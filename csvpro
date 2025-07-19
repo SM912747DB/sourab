@@ -1,0 +1,2427 @@
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { initializeApp, getApps } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
+import { Upload, Settings, Copy, X, Plus, Download, Trash2, ChevronDown, ChevronUp, Wand2, CheckCircle2, AlertCircle, FileText, Clock, Globe, RefreshCw, ShieldQuestion, BarChart3, FileSignature, BrainCircuit, LineChart, Youtube } from 'lucide-react';
+
+// --- Firebase Configuration ---
+// Ei global variable-gulo environment theke deya hobe.
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-csv-pro-app';
+
+// --- Helper Components ---
+
+const ApiProviderSelector = ({ provider, setProvider, title }) => (
+    <div className="my-3">
+        <label className="text-xs text-gray-400 flex justify-between items-center mb-1">
+            <span>{title}</span>
+        </label>
+        <select
+            value={provider}
+            onChange={(e) => setProvider(e.target.value)}
+            className="w-full bg-gray-700 text-white p-2 rounded-md border border-gray-600 focus:ring-orange-500 focus:border-orange-500 text-sm"
+        >
+            <option value="both">Both (Gemini, fallback to OpenRouter)</option>
+            <option value="gemini">Gemini API Only</option>
+            <option value="openrouter">OpenRouter API Only</option>
+        </select>
+    </div>
+);
+
+
+const Slider = ({ label, value, min, max, onChange, unit = '' }) => (
+    <div className="my-3">
+        <label className="text-xs text-gray-400 flex justify-between items-center">
+            <span>{label}</span>
+            <span className="text-orange-400 font-semibold">{value} {unit}</span>
+        </label>
+        <input
+            type="range"
+            min={min}
+            max={max}
+            value={value}
+            onChange={onChange}
+            className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer range-sm accent-orange-500"
+        />
+    </div>
+);
+
+const Toggle = ({ label, isEnabled, onToggle, pro = false }) => (
+    <div className="flex items-center justify-between my-3">
+        <span className="text-sm text-gray-300 flex items-center">
+            {label}
+            {pro && <span className="ml-2 text-xs bg-orange-500 text-white rounded-full px-2 py-0.5">PRO</span>}
+        </span>
+        <button
+            onClick={onToggle}
+            className={`relative inline-flex items-center h-6 rounded-full w-11 transition-colors duration-300 focus:outline-none ${isEnabled ? 'bg-orange-500' : 'bg-gray-600'}`}
+        >
+            <span
+                className={`inline-block w-4 h-4 transform bg-white rounded-full transition-transform duration-300 ${isEnabled ? 'translate-x-6' : 'translate-x-1'}`}
+            />
+        </button>
+    </div>
+);
+
+const ApiKeyManager = ({ title, apiKeys, setApiKeys, validationUrl, isEnabled, onToggle }) => {
+    const [isExpanded, setIsExpanded] = useState(false);
+
+    const addKey = () => {
+        setApiKeys([...apiKeys, { id: Date.now(), name: `API Key ${apiKeys.length + 1}`, value: '', validationState: 'idle' }]);
+    };
+
+    const removeKey = (id) => {
+        setApiKeys(apiKeys.filter(key => key.id !== id));
+    };
+
+    const updateKey = (id, field, value) => {
+        setApiKeys(apiKeys.map(key => key.id === id ? { ...key, [field]: value, validationState: 'idle' } : key));
+    };
+
+    const handleValidateKeys = async () => {
+        const validationPromises = apiKeys.map(async (key) => {
+            if (!key.value) {
+                return { ...key, validationState: 'invalid' };
+            }
+            
+            setApiKeys(prevKeys => prevKeys.map(k => k.id === key.id ? { ...k, validationState: 'validating' } : k));
+
+            try {
+                const response = await fetch(validationUrl(key.value), { 
+                    method: 'GET',
+                    ...(title === 'OpenRouter' && { headers: { 'Authorization': `Bearer ${key.value}` } })
+                });
+                if (response.ok) {
+                    return { ...key, validationState: 'valid' };
+                } else {
+                    return { ...key, validationState: 'invalid' };
+                }
+            } catch (error) {
+                console.error("Validation request failed:", error);
+                return { ...key, validationState: 'invalid' };
+            }
+        });
+
+        const validatedKeys = await Promise.all(validationPromises);
+        setApiKeys(validatedKeys);
+    };
+
+
+    return (
+        <div className="bg-gray-800 rounded-lg p-3 mt-4">
+            <div className="flex justify-between items-center">
+                <button onClick={() => setIsExpanded(!isExpanded)} className="flex-grow flex justify-between items-center text-sm font-semibold text-white">
+                    {title}
+                    {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                </button>
+                {onToggle && <Toggle isEnabled={isEnabled} onToggle={onToggle} />}
+            </div>
+            {isExpanded && (
+                <div className="mt-3">
+                    {apiKeys.map((key) => (
+                        <div key={key.id} className="flex items-center space-x-2 mb-2">
+                             <input
+                                type="text"
+                                value={key.name}
+                                onChange={(e) => updateKey(key.id, 'name', e.target.value)}
+                                placeholder="API Key Name"
+                                className="flex-grow min-w-0 bg-gray-700 text-white text-sm rounded-md p-2 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                            />
+                            <input
+                                type="password"
+                                value={key.value}
+                                onChange={(e) => updateKey(key.id, 'value', e.target.value)}
+                                placeholder="Enter your API key"
+                                className="flex-grow min-w-0 bg-gray-700 text-white text-sm rounded-md p-2 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                            />
+                            <div className="flex items-center">
+                                {key.validationState === 'validating' && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>}
+                                {key.validationState === 'valid' && <CheckCircle2 size={16} className="text-green-500 mr-2" />}
+                                {key.validationState === 'invalid' && <AlertCircle size={16} className="text-red-500 mr-2" />}
+                                <button onClick={() => removeKey(key.id)} className="text-red-500 hover:text-red-400 p-1">
+                                    <X size={16} />
+                                </button>
+                            </div>
+                        </div>
+                    ))}
+                    <button onClick={handleValidateKeys} className="w-full mt-2 text-sm text-white bg-gray-700 hover:bg-gray-600 flex items-center justify-center p-2 rounded-md">
+                        Validate API Keys
+                    </button>
+                    <button onClick={addKey} className="w-full mt-2 text-sm text-orange-400 hover:text-orange-300 flex items-center justify-center p-2 rounded-md border border-dashed border-gray-600 hover:border-orange-500">
+                        <Plus size={16} className="mr-1" /> Add Key
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+};
+
+const UploadStats = ({ files, view, clearAllFiles }) => (
+    !view ? null : (
+        <div className="bg-gray-900 rounded-lg p-4 my-6">
+            <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold text-white">Selected Files ({files.length})</h3>
+                <button onClick={clearAllFiles} className="bg-red-600 text-white px-4 py-2 rounded-md text-sm font-semibold flex items-center hover:bg-red-700">
+                    <Trash2 size={16} className="mr-2" />
+                    Clear All
+                </button>
+            </div>
+            <div className="bg-gray-800 rounded-lg p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+                <div>
+                    <FileText size={24} className="mx-auto text-blue-400 mb-2" />
+                    <p className="text-2xl font-bold text-white">{files.length}</p>
+                    <p className="text-sm text-gray-400">Total Files</p>
+                </div>
+                <div>
+                    <Clock size={24} className="mx-auto text-yellow-400 mb-2" />
+                    <p className="text-2xl font-bold text-white">{files.filter(f => f.status[view] === 'pending' || f.status[view] === 'processing').length}</p>
+                    <p className="text-sm text-gray-400">Remaining</p>
+                </div>
+                <div>
+                    <CheckCircle2 size={24} className="mx-auto text-green-400 mb-2" />
+                    <p className="text-2xl font-bold text-white">{files.filter(f => f.status[view] === 'completed').length}</p>
+                    <p className="text-sm text-gray-400">Processed</p>
+                </div>
+                <div>
+                    <AlertCircle size={24} className="mx-auto text-red-400 mb-2" />
+                    <p className="text-2xl font-bold text-white">{files.filter(f => f.status[view] === 'error').length}</p>
+                    <p className="text-sm text-gray-400">Failed</p>
+                </div>
+            </div>
+        </div>
+    )
+);
+
+const FileThumbnailPreview = ({ uploadedFiles, removeFile }) => (
+    uploadedFiles.length === 0 ? null : (
+        <div className="bg-gray-900 rounded-lg p-4 my-6">
+             <h3 className="text-lg font-semibold text-white mb-4">Uploaded Files Preview</h3>
+             <div className="flex flex-nowrap overflow-x-auto space-x-4 p-2">
+                {uploadedFiles.map(file => (
+                    <div key={file.id} className="relative flex-shrink-0 w-32 text-center">
+                        <img src={file.preview} alt={file.name} className="w-32 h-32 object-cover rounded-md mb-2" />
+                        <button 
+                            onClick={() => removeFile(file.id)} 
+                            className="absolute top-1 right-1 bg-red-600 text-white rounded-full p-0.5 hover:bg-red-700 transition-colors"
+                            aria-label="Remove file"
+                        >
+                            <X size={12} />
+                        </button>
+                        <p className="text-xs text-gray-400 truncate">{file.name}</p>
+                    </div>
+                ))}
+             </div>
+        </div>
+    )
+);
+
+const PromptSettingsPanel = ({ title, minWords, setMinWords, maxWords, setMaxWords, onProcess, onCancel, apiProvider, setApiProvider }) => (
+    <div className="bg-gray-900 rounded-lg p-4 my-6">
+        <h3 className="text-lg font-semibold text-white mb-4">{title}</h3>
+        <div className="bg-gray-800 rounded-lg p-3 space-y-4">
+            <ApiProviderSelector provider={apiProvider} setProvider={setApiProvider} title="API Provider" />
+            <Slider label="Min Prompt Words" value={minWords} min={10} max={500} onChange={(e) => setMinWords(e.target.value)} unit="words" />
+            <Slider label="Max Prompt Words" value={maxWords} min={10} max={500} onChange={(e) => setMaxWords(e.target.value)} unit="words" />
+        </div>
+        <div className="flex justify-end gap-4 mt-4">
+             <button onClick={onCancel} className="bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors">
+                Cancel
+            </button>
+            <button onClick={onProcess} className="bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors">
+                Process
+            </button>
+        </div>
+    </div>
+);
+
+
+const copyToClipboard = (text) => {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    try {
+        document.execCommand('copy');
+    } catch (err) {
+        console.error('Failed to copy: ', err);
+    }
+    document.body.removeChild(textArea);
+};
+
+// New helper function to clean JSON strings from markdown fences
+const cleanJsonString = (str) => {
+    if (typeof str !== 'string') return str;
+    const regex = /```json\s*([\s\S]*?)\s*```/;
+    const match = str.match(regex);
+    if (match && match[1]) {
+        return match[1];
+    }
+    return str;
+};
+
+
+// --- Main Components ---
+
+const Sidebar = ({ settings, setSettings, apiKeys, setApiKeys, openRouterKeys, setOpenRouterKeys, isOpenRouterEnabled, setIsOpenRouterEnabled }) => {
+    return (
+        <aside className="w-full lg:w-80 bg-gray-900 p-4 flex flex-col space-y-4">
+            <div className="text-center mb-4">
+                <h1 className="text-2xl font-bold text-white">CSV <span className="text-orange-500">PRO</span></h1>
+            </div>
+            
+            <div>
+                <h2 className="text-sm font-semibold text-gray-400 mb-2">METADATA CUSTOMIZATION</h2>
+                <div className="bg-gray-800 rounded-lg p-3">
+                    <Slider label="Min Title Words" value={settings.minTitle} min={1} max={100} onChange={(e) => setSettings({...settings, minTitle: e.target.value})} unit="words" />
+                    <Slider label="Max Title Words" value={settings.maxTitle} min={1} max={100} onChange={(e) => setSettings({...settings, maxTitle: e.target.value})} unit="words" />
+                    <Slider label="Min Keywords" value={settings.minKeywords} min={5} max={100} onChange={(e) => setSettings({...settings, minKeywords: e.target.value})} unit="words" />
+                    <Slider label="Max Keywords" value={settings.maxKeywords} min={5} max={100} onChange={(e) => setSettings({...settings, maxKeywords: e.target.value})} unit="words" />
+                    <Slider label="Min Description Words" value={settings.minDescription} min={10} max={100} onChange={(e) => setSettings({...settings, minDescription: e.target.value})} unit="words" />
+                    <Slider label="Max Description Words" value={settings.maxDescription} min={10} max={100} onChange={(e) => setSettings({...settings, maxDescription: e.target.value})} unit="words" />
+                </div>
+            </div>
+
+            <div>
+                 <h2 className="text-sm font-semibold text-gray-400 mb-2">SETTINGS</h2>
+                <div className="bg-gray-800 rounded-lg p-3">
+                    <Toggle label="SILHOUETTE" isEnabled={settings.silhouette} onToggle={() => setSettings({...settings, silhouette: !settings.silhouette})} pro />
+                    <Toggle label="CUSTOM PROMPT" isEnabled={settings.customPrompt} onToggle={() => setSettings({...settings, customPrompt: !settings.customPrompt})} pro />
+                    <Toggle label="White Background" isEnabled={settings.whiteBackground} onToggle={() => setSettings({...settings, whiteBackground: !settings.whiteBackground})} />
+                    <Toggle label="Transparent Background" isEnabled={settings.transparentBackground} onToggle={() => setSettings({...settings, transparentBackground: !settings.transparentBackground})} pro />
+                    <Toggle label="PROHIBITED WORDS" isEnabled={settings.prohibitedWords} onToggle={() => setSettings({...settings, prohibitedWords: !settings.prohibitedWords})} pro />
+                    <Toggle label="SINGLE WORD KEYWORDS" isEnabled={settings.singleWordKeywords} onToggle={() => setSettings({...settings, singleWordKeywords: !settings.singleWordKeywords})} pro />
+                </div>
+            </div>
+            
+            <ApiKeyManager 
+                title="Gemini API"
+                apiKeys={apiKeys} 
+                setApiKeys={setApiKeys}
+                validationUrl={(key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash?key=${key}`}
+            />
+            <ApiKeyManager 
+                title="OpenRouter"
+                apiKeys={openRouterKeys} 
+                setApiKeys={setOpenRouterKeys}
+                validationUrl={() => `https://openrouter.ai/api/v1/auth/key`}
+                isEnabled={isOpenRouterEnabled}
+                onToggle={() => setIsOpenRouterEnabled(!isOpenRouterEnabled)}
+            />
+             <div className="bg-gray-800 rounded-lg p-4 text-center">
+                <Globe size={24} className="mx-auto text-green-400 mb-2" />
+                <h4 className="font-semibold text-white mb-2">Why OpenRouter?</h4>
+                <ul className="text-xs text-gray-400 space-y-1 list-disc list-inside text-left">
+                    <li>Free tier with higher limits</li>
+                    <li>Access to multiple AI models</li>
+                    <li>Better rate limit handling</li>
+                </ul>
+                <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer" className="text-sm text-orange-400 hover:underline mt-3 inline-block">
+                    Get OpenRouter API Key →
+                </a>
+            </div>
+
+        </aside>
+    );
+};
+
+const FileCard = ({ file, platform }) => {
+    const { metadata, status } = file;
+
+    const renderContent = () => {
+        switch (platform) {
+            case 'AdobeStock':
+                return (
+                    <>
+                        <p><strong className="text-gray-200">Filename:</strong> {file.name}</p>
+                        <p><strong className="text-gray-200">Title:</strong> {metadata.title}</p>
+                        <p><strong className="text-gray-200">Keywords:</strong> {metadata.keywords}</p>
+                    </>
+                );
+            case 'Freepik':
+                 return (
+                    <>
+                        <p><strong className="text-gray-200">Filename:</strong> {file.name}</p>
+                        <p><strong className="text-gray-200">Title:</strong> {metadata.title}</p>
+                        <p><strong className="text-gray-200">Keywords:</strong> {metadata.keywords}</p>
+                        <p><strong className="text-gray-200">Prompt:</strong> {metadata.prompt}</p>
+                        <p><strong className="text-gray-200">Base-model:</strong> {metadata.aiBaseModel}</p>
+                    </>
+                );
+            case 'General':
+            default:
+                return (
+                    <>
+                        <p><strong className="text-gray-200">Title:</strong> {metadata.title}</p>
+                        <p><strong className="text-gray-200">Description:</strong> {metadata.description}</p>
+                        <p><strong className="text-gray-200">Keywords:</strong> {metadata.keywords}</p>
+                        <p><strong className="text-gray-200">Category:</strong> {metadata.category}</p>
+                        <p><strong className="text-gray-200">Prompt:</strong> {metadata.prompt}</p>
+                        <p><strong className="text-gray-200">AI Model:</strong> {metadata.aiBaseModel}</p>
+                    </>
+                );
+        }
+    };
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-4">
+            <div className="flex justify-between items-start mb-2">
+                <p className="text-xs text-gray-400 break-all">{file.name}</p>
+                <div className="flex items-center space-x-2">
+                    {status.rewrite === 'processing' && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-400"></div>}
+                    {status.metadata === 'processing' && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-orange-500"></div>}
+                    {status.metadata === 'error' && <div className="text-red-500 text-xs">Error</div>}
+                </div>
+            </div>
+            <img src={file.preview} alt="Preview" className="w-full h-32 object-cover rounded-md mb-3" />
+            <div className="space-y-2 text-xs">
+                <h4 className="font-semibold text-gray-300">Generated Metadata ({platform})</h4>
+                <div className="bg-gray-800 p-2 rounded-md text-gray-400 h-24 overflow-y-auto">
+                    {renderContent()}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const PromptResultItem = ({ file, type }) => {
+    const prompt = type === 'ai' ? file.aiPrompt : file.videoPrompt;
+    const status = type === 'ai' ? file.status.aiPrompt : file.status.videoPrompt;
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-4 flex flex-col">
+            <img src={file.preview} alt="Prompt inspiration" className="w-full h-48 object-cover rounded-md mb-4"/>
+            <div className="relative flex-grow flex flex-col">
+                <textarea readOnly value={status === 'processing' ? 'generation prompt...' : status === 'error' ? 'Error generating prompt.' : prompt} className="w-full flex-grow bg-gray-800 text-gray-300 text-sm p-3 rounded-md resize-none border border-gray-700"></textarea>
+                {status === 'completed' && (
+                    <button onClick={() => copyToClipboard(prompt)} className="absolute top-2 right-2 p-1.5 bg-gray-700 rounded-md text-gray-300 hover:bg-orange-500 hover:text-white transition-colors">
+                        <Copy size={16} />
+                    </button>
+                )}
+                {status === 'processing' && <div className="absolute top-2 right-2 animate-spin rounded-full h-5 w-5 border-b-2 border-orange-500"></div>}
+            </div>
+        </div>
+    );
+};
+
+const RejectionAnalysisCard = ({ file }) => {
+    const { rejectionAnalysis, status } = file;
+
+    if (status.rejectionAnalysis === 'processing') {
+        return (
+            <div className="bg-gray-900 rounded-lg p-4 flex flex-col items-center justify-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500 mb-4"></div>
+                <p className="text-white">generation prompt...</p>
+            </div>
+        );
+    }
+
+    if (status.rejectionAnalysis === 'error' || !rejectionAnalysis) {
+        return (
+            <div className="bg-gray-900 rounded-lg p-4 flex flex-col items-center justify-center">
+                <AlertCircle size={32} className="text-red-500 mb-4" />
+                <p className="text-white">Could not analyze image.</p>
+            </div>
+        );
+    }
+    
+    return (
+        <div className="bg-gray-900 rounded-lg p-4">
+            <div className="flex justify-between items-start mb-3">
+                <p className="text-sm text-gray-300 break-all font-semibold">{file.name}</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <img src={file.preview} alt="Analyzed" className="w-full h-48 object-cover rounded-md"/>
+                <div className="text-xs text-gray-400 space-y-3">
+                    <div>
+                        <h4 className="font-bold text-gray-200 mb-1">Potential Issues</h4>
+                        <ul className="list-disc list-inside space-y-1">
+                            {rejectionAnalysis.potentialIssues?.map((issue, index) => (
+                                <li key={index}>
+                                    <span className="font-semibold text-orange-400">{issue.reason}:</span> {issue.explanation}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                     <div>
+                        <h4 className="font-bold text-gray-200 mb-1">Suggested Fixes</h4>
+                        <ul className="list-disc list-inside space-y-1">
+                            {rejectionAnalysis.suggestedFixes?.map((fix, index) => (
+                                <li key={index}>{fix}</li>
+                            ))}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const CompetitiveAnalysisCard = ({ file, onAnalyze, platform }) => {
+    const [keyword, setKeyword] = useState('');
+    const { competitionAnalysis, status } = file;
+
+    const handleAnalyzeClick = () => {
+        if (keyword.trim()) {
+            onAnalyze(file.id, keyword.trim(), platform);
+        }
+    };
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-4">
+            <p className="text-sm text-gray-300 break-all font-semibold mb-3">{file.name}</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <img src={file.preview} alt="For analysis" className="w-full h-48 object-cover rounded-md"/>
+                <div className="flex flex-col">
+                    <div className="flex gap-2 mb-3">
+                        <input 
+                            type="text"
+                            value={keyword}
+                            onChange={(e) => setKeyword(e.target.value)}
+                            placeholder="Enter target keyword..."
+                            className="flex-grow bg-gray-700 text-white text-sm rounded-md p-2 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                        />
+                        <button onClick={handleAnalyzeClick} className="bg-orange-500 hover:bg-orange-600 text-white font-semibold px-4 rounded-lg transition-colors">
+                            Analyze
+                        </button>
+                    </div>
+                    <div className="flex-grow bg-gray-800 rounded-md p-2 text-xs text-gray-400 overflow-y-auto h-32">
+                        {status.competitionAnalysis === 'processing' && <p>generation prompt...</p>}
+                        {status.competitionAnalysis === 'error' && <p className="text-red-400">Analysis failed.</p>}
+                        {status.competitionAnalysis === 'completed' && competitionAnalysis && (
+                            <div className="space-y-2">
+                                <p><strong className="text-orange-400">Score: {competitionAnalysis.competitiveScore}/10</strong></p>
+                                <div><strong className="text-gray-200">Market Trends:</strong><p>{competitionAnalysis.marketTrends}</p></div>
+                                <div><strong className="text-gray-200">Identified Gaps:</strong><p>{competitionAnalysis.identifiedGaps}</p></div>
+                                <div><strong className="text-gray-200">Suggestions:</strong><p>{competitionAnalysis.suggestions}</p></div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const AltTextCard = ({ file }) => {
+    const { altText, status } = file;
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-4 flex flex-col">
+            <img src={file.preview} alt="For alt text generation" className="w-full h-48 object-cover rounded-md mb-4"/>
+            <div className="relative flex-grow flex flex-col">
+                <h4 className="text-sm font-semibold text-gray-300 mb-2">Generated Alt Text</h4>
+                <textarea 
+                    readOnly 
+                    value={status.altText === 'processing' ? 'generation prompt...' : status.altText === 'error' ? 'Error generating alt text.' : altText} 
+                    className="w-full flex-grow bg-gray-800 text-gray-300 text-sm p-3 rounded-md resize-none border border-gray-700"
+                ></textarea>
+                {status.altText === 'completed' && (
+                    <button onClick={() => copyToClipboard(altText)} className="absolute top-9 right-2 p-1.5 bg-gray-700 rounded-md text-gray-300 hover:bg-orange-500 hover:text-white transition-colors">
+                        <Copy size={16} />
+                    </button>
+                )}
+                {status.altText === 'processing' && <div className="absolute top-9 right-2 animate-spin rounded-full h-5 w-5 border-b-2 border-orange-500"></div>}
+            </div>
+        </div>
+    );
+};
+
+const CategoryPromptGenerator = ({ platform, categories, promptTypes, handlers }) => {
+    const [selectedCategory, setSelectedCategory] = useState(categories[0]);
+    const [selectedPromptType, setSelectedPromptType] = useState(promptTypes[0]);
+    const [minWords, setMinWords] = useState(10);
+    const [maxWords, setMaxWords] = useState(500);
+    const [promptCount, setPromptCount] = useState(10);
+    const [generatedPrompts, setGeneratedPrompts] = useState([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [isJsPdfScriptReady, setIsJsPdfScriptReady] = useState(false);
+    const [apiProvider, setApiProvider] = useState('both');
+
+
+    useEffect(() => {
+        if (!window.jspdf) {
+            const pdfScript = document.createElement('script');
+            pdfScript.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+            pdfScript.async = true;
+            pdfScript.onload = () => setIsJsPdfScriptReady(true);
+            pdfScript.onerror = () => setError("PDF generator script load korte problem hocche.");
+            document.body.appendChild(pdfScript);
+        } else {
+            setIsJsPdfScriptReady(true);
+        }
+    }, []);
+
+    const handleGenerate = async () => {
+        setIsLoading(true);
+        setError('');
+        setGeneratedPrompts([]);
+
+        const systemPrompt = `Apni AI image model-er jonno ekjon expert prompt generator. Apnar kaj hocche "${platform}" stock platform-er jonno ekta specific category-r upor ভিত্তি kore unique, creative, ebong high-quality prompt-er ekta list toiri kora.
+        **Khub guruttopurno: Apnar toiri kora prottekta prompt-i hobe notun, unique, ebong list-er onnanno prompt theke alada.** Kono idea repeat korben na.
+
+        **Platform:** ${platform}
+        **Category:** ${selectedCategory}
+        **Prompt Type to Optimize For:** ${selectedPromptType}
+        **Word Count per Prompt:** ${minWords} theke ${maxWords} shobder moddhe.
+        **Number of Prompts to Generate:** ${promptCount}
+
+        Shudhumatro ekta valid JSON object return korun, jetar moddhe "prompts" name ekta key thakbe. Ei key-er value hobe ekta string-er array. Prottekta string hobe ekta unique, notun toiri kora prompt.`;
+        
+        try {
+            const generationConfig = { responseMimeType: "application/json" };
+            const data = await handlers.makeStandaloneApiCall(systemPrompt, true, generationConfig, apiProvider);
+            setGeneratedPrompts(data.prompts || []);
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleDownloadTxt = () => {
+        setError('');
+        if (generatedPrompts.length === 0) {
+            setError("Download korar moto kono prompt nei.");
+            return;
+        }
+
+        try {
+            const textContent = generatedPrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join('\n\n');
+            const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${platform}_${selectedCategory}_prompts.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            setError("TXT file toiri korte somossa hocche.");
+            console.error(e);
+        }
+    };
+
+    const handleDownloadPdf = () => {
+        setError('');
+        if (!isJsPdfScriptReady || !window.jspdf) {
+            setError("PDF generator ready na. Ektu por chesta korun.");
+            return;
+        }
+        try {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            let y = 10;
+            generatedPrompts.forEach((prompt, i) => {
+                const text = `${i + 1}. ${prompt}`;
+                const splitText = doc.splitTextToSize(text, 180);
+                if (y + (splitText.length * 10) > 280) {
+                    doc.addPage();
+                    y = 10;
+                }
+                doc.text(splitText, 10, y);
+                y += (splitText.length * 10) + 5;
+            });
+            doc.save(`${platform}_${selectedCategory}_prompts.pdf`);
+        } catch (e) {
+            setError("PDF document toiri korte somossa hocche.");
+            console.error(e);
+        }
+    };
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-6 my-6">
+            <h3 className="text-xl font-semibold text-white mb-4 flex items-center">
+                <BrainCircuit size={24} className="mr-3 text-orange-400" /> Stock Master: {platform}
+            </h3>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Category</label>
+                        <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)} className="w-full bg-gray-800 text-white p-2 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500">
+                            {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Prompt Type</label>
+                        <select value={selectedPromptType} onChange={(e) => setSelectedPromptType(e.target.value)} className="w-full bg-gray-800 text-white p-2 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500">
+                            {promptTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                        </select>
+                    </div>
+                    <ApiProviderSelector provider={apiProvider} setProvider={setApiProvider} title="API Provider" />
+                    <Slider label="Min Prompt Words" value={minWords} min={10} max={500} onChange={(e) => setMinWords(e.target.value)} unit="words" />
+                    <Slider label="Max Prompt Words" value={maxWords} min={10} max={500} onChange={(e) => setMaxWords(e.target.value)} unit="words" />
+                    <Slider label="Prompt Count" value={promptCount} min={1} max={500} onChange={(e) => setPromptCount(e.target.value)} unit="prompts" />
+                    <button onClick={handleGenerate} disabled={isLoading} className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center disabled:bg-gray-500">
+                        {isLoading ? <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div> : 'generation prompt'}
+                    </button>
+                </div>
+                <div className="flex flex-col">
+                    <div className="flex justify-between items-center mb-2">
+                         <h4 className="text-lg font-semibold text-white">Generated Prompts</h4>
+                         {generatedPrompts.length > 0 && (
+                            <div className="flex space-x-2">
+                                <button onClick={handleDownloadTxt} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors flex items-center">
+                                    <Download size={16} className="mr-2" /> TXT
+                                </button>
+                                <button onClick={handleDownloadPdf} disabled={!isJsPdfScriptReady} className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors flex items-center disabled:bg-gray-500 disabled:cursor-not-allowed">
+                                    <Download size={16} className="mr-2" /> PDF
+                                </button>
+                            </div>
+                         )}
+                    </div>
+                    <div className="bg-gray-800 rounded-md p-3 flex-grow h-80 overflow-y-auto">
+                        {isLoading && <p className="text-gray-400">generation prompt...</p>}
+                        {error && <p className="text-red-400 text-sm">{error}</p>}
+                        {!isLoading && !error && generatedPrompts.length === 0 && <p className="text-gray-500">Apnar toiri kora prompt ekhane dekhabe.</p>}
+                        <ul className="space-y-2 text-sm text-gray-300">
+                            {generatedPrompts.map((prompt, index) => (
+                                <li key={index} className="bg-gray-700 p-2 rounded-md">{index + 1}. {prompt}</li>
+                            ))}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const StockMaster = ({ handlers }) => {
+    const [platform, setPlatform] = useState(null);
+    const adobeStockCategories = ["Animals", "Buildings and Architecture", "Business", "Drinks", "The Environment", "States of Mind", "Food", "Graphic Resources", "Hobbies and Leisure", "Industry", "Landscape", "Lifestyle", "People", "Plants and Flowers", "Culture and Religion", "Science", "Social Issues", "Sports", "Technology", "Transport", "Travel"];
+    const freepikCategories = ["Backgrounds", "Business", "Fashion", "Food", "Health", "Nature", "People", "Technology", "Travel", "Objects", "Lifestyle", "Education", "Animals", "Art"];
+    const promptTypes = ["Image", "Vector", "Illustration"];
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-6 my-6">
+            <h3 className="text-xl font-semibold text-white mb-4 flex items-center">
+                <BrainCircuit size={24} className="mr-3 text-orange-400" /> Stock Master
+            </h3>
+            <div className="flex justify-center space-x-4 mb-6">
+                <button onClick={() => setPlatform('Adobe Stock')} className={`px-6 py-3 rounded-lg font-semibold transition-colors ${platform === 'Adobe Stock' ? 'bg-orange-500 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>Adobe Stock</button>
+                <button onClick={() => setPlatform('Freepik')} className={`px-6 py-3 rounded-lg font-semibold transition-colors ${platform === 'Freepik' ? 'bg-orange-500 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>Freepik</button>
+            </div>
+            {platform === 'Adobe Stock' && <CategoryPromptGenerator platform="Adobe Stock" categories={adobeStockCategories} promptTypes={promptTypes} handlers={handlers} />}
+            {platform === 'Freepik' && <CategoryPromptGenerator platform="Freepik" categories={freepikCategories} promptTypes={promptTypes} handlers={handlers} />}
+        </div>
+    );
+};
+
+const PromptMaster = ({ handlers }) => {
+    const [basePrompt, setBasePrompt] = useState('');
+    const [generationType, setGenerationType] = useState('sameStyle');
+    const [promptType, setPromptType] = useState('image');
+    const [minWords, setMinWords] = useState(50);
+    const [maxWords, setMaxWords] = useState(150);
+    const [promptCount, setPromptCount] = useState(10);
+    const [generatedPrompts, setGeneratedPrompts] = useState([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [isJsPdfScriptReady, setIsJsPdfScriptReady] = useState(false);
+    const [apiProvider, setApiProvider] = useState('both');
+
+    useEffect(() => {
+        if (!window.jspdf) {
+            const pdfScript = document.createElement('script');
+            pdfScript.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+            pdfScript.async = true;
+            pdfScript.onload = () => setIsJsPdfScriptReady(true);
+            pdfScript.onerror = () => setError("PDF generator script load korte problem hocche.");
+            document.body.appendChild(pdfScript);
+        } else {
+            setIsJsPdfScriptReady(true);
+        }
+    }, []);
+    
+    const handleGenerate = async () => {
+        setIsLoading(true);
+        setError('');
+        setGeneratedPrompts([]);
+
+        const systemPrompt = `Apni ekjon creative assistant, jini AI image generator-er jonno high-quality, unique image prompt toiri korte expert.
+        User-er request-er upor ভিত্তি kore, notun prompt-er ekta list toiri korun.
+        **Khub guruttopurno: Apnar toiri kora prottekta prompt-i hobe notun, unique, ebong list-er onnanno prompt theke ebong base prompt theke alada.** Kono idea repeat korben na.
+
+        Generation Type: "${generationType === 'sameStyle' ? 'Same Style' : 'Same Category'}"
+        **Optimize for Prompt Type:** "${promptType}"
+        Base Prompt for inspiration: "${basePrompt}"
+        Each prompt must be between ${minWords} and ${maxWords} words.
+        Number of prompts to generate: ${promptCount}
+        Shudhumatro ekta valid JSON object return korun, jetar moddhe "prompts" name ekta key thakbe. Ei key-er value hobe ekta string-er array. Prottekta string hobe ekta unique, notun toiri kora prompt.`;
+        
+        try {
+            const generationConfig = { responseMimeType: "application/json" };
+            const data = await handlers.makeStandaloneApiCall(systemPrompt, true, generationConfig, apiProvider);
+            setGeneratedPrompts(data.prompts || []);
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleDownloadTxt = () => {
+        setError('');
+        if (generatedPrompts.length === 0) {
+            setError("Download korar moto kono prompt nei.");
+            return;
+        }
+
+        try {
+            const textContent = generatedPrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join('\n\n');
+            const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "generated_prompts.txt";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            setError("TXT file toiri korte somossa hocche.");
+            console.error(e);
+        }
+    };
+
+    const handleDownloadPdf = () => {
+        setError('');
+        if (!isJsPdfScriptReady || !window.jspdf) {
+            setError("PDF generator ready na. Ektu por chesta korun.");
+            return;
+        }
+        try {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            let y = 10;
+            generatedPrompts.forEach((prompt, i) => {
+                const text = `${i + 1}. ${prompt}`;
+                const splitText = doc.splitTextToSize(text, 180);
+                if (y + (splitText.length * 10) > 280) {
+                    doc.addPage();
+                    y = 10;
+                }
+                doc.text(splitText, 10, y);
+                y += (splitText.length * 10) + 5;
+            });
+            doc.save("generated_prompts.pdf");
+        } catch (e) {
+            setError("PDF document toiri korte somossa hocche.");
+            console.error(e);
+        }
+    };
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-6 my-6">
+            <h3 className="text-xl font-semibold text-white mb-4 flex items-center">
+                <BrainCircuit size={24} className="mr-3 text-orange-400" /> Prompt Master
+            </h3>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Control Panel */}
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Base Prompt</label>
+                        <textarea
+                            value={basePrompt}
+                            onChange={(e) => setBasePrompt(e.target.value)}
+                            placeholder="e.g., a futuristic cityscape at night, neon lights, flying cars..."
+                            className="w-full h-28 bg-gray-800 text-white p-2 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Generation Type</label>
+                        <select
+                            value={generationType}
+                            onChange={(e) => setGenerationType(e.target.value)}
+                            className="w-full bg-gray-800 text-white p-2 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                        >
+                            <option value="sameStyle">Same Style</option>
+                            <option value="sameCategory">Same Category</option>
+                        </select>
+                    </div>
+                     <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Prompt Type</label>
+                        <select
+                            value={promptType}
+                            onChange={(e) => setPromptType(e.target.value)}
+                            className="w-full bg-gray-800 text-white p-2 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                        >
+                            <option value="vector">Vector</option>
+                            <option value="image">Image</option>
+                            <option value="illustration">Illustration</option>
+                            <option value="icon">Icon</option>
+                            <option value="logo">Logo</option>
+                            <option value="plastic 3d">Plastic 3D</option>
+                            <option value="photorealistic">Photorealistic</option>
+                            <option value="hdr">HDR</option>
+                            <option value="commercial">Commercial</option>
+                        </select>
+                    </div>
+                    <ApiProviderSelector provider={apiProvider} setProvider={setApiProvider} title="API Provider" />
+                    <Slider label="Min Prompt Words" value={minWords} min={10} max={500} onChange={(e) => setMinWords(e.target.value)} unit="words" />
+                    <Slider label="Max Prompt Words" value={maxWords} min={10} max={500} onChange={(e) => setMaxWords(e.target.value)} unit="words" />
+                    <Slider label="Prompt Count" value={promptCount} min={1} max={100} onChange={(e) => setPromptCount(e.target.value)} unit="prompts" />
+                    <button
+                        onClick={handleGenerate}
+                        disabled={isLoading}
+                        className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center disabled:bg-gray-500"
+                    >
+                        {isLoading ? <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div> : 'generation prompt'}
+                    </button>
+                </div>
+
+                {/* Results Panel */}
+                <div className="flex flex-col">
+                    <div className="flex justify-between items-center mb-2">
+                         <h4 className="text-lg font-semibold text-white">Generated Prompts</h4>
+                         {generatedPrompts.length > 0 && (
+                            <div className="flex space-x-2">
+                                <button
+                                    onClick={handleDownloadTxt}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors flex items-center"
+                                >
+                                    <Download size={16} className="mr-2" /> TXT
+                                </button>
+                                <button
+                                    onClick={handleDownloadPdf}
+                                    disabled={!isJsPdfScriptReady}
+                                    className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors flex items-center disabled:bg-gray-500 disabled:cursor-not-allowed"
+                                >
+                                    <Download size={16} className="mr-2" /> PDF
+                                </button>
+                            </div>
+                         )}
+                    </div>
+                    <div className="bg-gray-800 rounded-md p-3 flex-grow h-80 overflow-y-auto">
+                        {isLoading && <p className="text-gray-400">generation prompt...</p>}
+                        {error && <p className="text-red-400 text-sm">{error}</p>}
+                        {!isLoading && !error && generatedPrompts.length === 0 && <p className="text-gray-500">Apnar toiri kora prompt ekhane dekhabe.</p>}
+                        <ul className="space-y-2 text-sm text-gray-300">
+                            {generatedPrompts.map((prompt, index) => (
+                                <li key={index} className="bg-gray-700 p-2 rounded-md">{index + 1}. {prompt}</li>
+                            ))}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const MarketTrendsAnalyzer = ({ handlers }) => {
+    const [keyword, setKeyword] = useState('');
+    const [platform, setPlatform] = useState('AdobeStock');
+    const [timeframe, setTimeframe] = useState('Last 6 Months');
+    const [region, setRegion] = useState('Global');
+    const [imageType, setImageType] = useState('All');
+    const [trendsData, setTrendsData] = useState(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [apiProvider, setApiProvider] = useState('both');
+
+    const platforms = ["AdobeStock", "Freepik", "Shutterstock", "Vecteezy", "Depositphotos", "123RF", "Dreamstime"];
+    const timeframes = ["Last 3 Months", "Last 6 Months", "Last Year", "All Time"];
+    const regions = ["Global", "North America", "Europe", "Asia", "South America", "Africa", "Oceania"];
+    const imageTypes = ["All", "Photo", "Vector", "Illustration"];
+
+    const handleAnalyzeTrends = async () => {
+        setIsLoading(true);
+        setError('');
+        setTrendsData(null);
+
+        const systemPrompt = `Analyze market trends for the keyword "${keyword}" on the platform "${platform}".
+        Consider the timeframe: "${timeframe}", geographic region: "${region}", and image type: "${imageType}".
+        Provide the analysis in a JSON object with the following structure:
+        {
+            "trendScore": "An integer from 1 to 100 indicating overall trend strength.",
+            "growthPotential": "A string indicating growth potential (e.g., 'High', 'Medium', 'Low').",
+            "competitiveLandscapeSummary": "A concise summary of the competitive landscape for this keyword.",
+            "visualTrends": ["List of visual trends relevant to the keyword"],
+            "conceptualTrends": ["List of conceptual trends relevant to the keyword"],
+            "keywordOpportunities": ["List of keyword opportunities (e.g., "Upcycled materials", "Sustainable fashion")"],
+            "relatedKeywords": ["List of closely related keywords"],
+            "shotListSuggestions": ["List of shot list suggestions (e.g., "Close-up of hands sorting compost")"],
+            "topPerformingContentExamples": ["List of descriptions of top-performing content styles/subjects."]
+        }
+        Ensure the lists are concise and actionable. Provide realistic data for trendScore and growthPotential.`;
+
+        try {
+            const generationConfig = { responseMimeType: "application/json" };
+            const data = await handlers.makeStandaloneApiCall(systemPrompt, true, generationConfig, apiProvider);
+            setTrendsData(data);
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const copyAllResults = () => {
+        if (!trendsData) return;
+        let textToCopy = `Market Trends Analysis for "${keyword}" on ${platform} (${timeframe}, ${region}, ${imageType}):\n\n`;
+        textToCopy += `Trend Score: ${trendsData.trendScore}/100\n`;
+        textToCopy += `Growth Potential: ${trendsData.growthPotential}\n`;
+        textToCopy += `Competitive Landscape: ${trendsData.competitiveLandscapeSummary}\n\n`;
+        textToCopy += `Visual Trends:\n- ${trendsData.visualTrends?.join('\n- ')}\n\n`;
+        textToCopy += `Conceptual Trends:\n- ${trendsData.conceptualTrends?.join('\n- ')}\n\n`;
+        textToCopy += `Keyword Opportunities:\n- ${trendsData.keywordOpportunities?.join('\n- ')}\n\n`;
+        textToCopy += `Related Keywords:\n- ${trendsData.relatedKeywords?.join('\n- ')}\n\n`;
+        textToCopy += `Shot List Suggestions:\n- ${trendsData.shotListSuggestions?.join('\n- ')}\n\n`;
+        textToCopy += `Top Performing Content Examples:\n- ${trendsData.topPerformingContentExamples?.join('\n- ')}\n`;
+        copyToClipboard(textToCopy);
+    };
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-6 my-6">
+            <h3 className="text-xl font-semibold text-white mb-4 flex items-center">
+                <LineChart size={24} className="mr-3 text-orange-400" /> Market Trends Analyzer
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                <input
+                    type="text"
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                    placeholder="Enter keyword (e.g., 'sustainable living')"
+                    className="flex-grow bg-gray-800 text-white p-3 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                />
+                <select
+                    value={platform}
+                    onChange={(e) => setPlatform(e.target.value)}
+                    className="bg-gray-800 text-white p-3 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                >
+                    {platforms.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+                 <select
+                    value={timeframe}
+                    onChange={(e) => setTimeframe(e.target.value)}
+                    className="bg-gray-800 text-white p-3 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                >
+                    {timeframes.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                </select>
+                <select
+                    value={region}
+                    onChange={(e) => setRegion(e.target.value)}
+                    className="bg-gray-800 text-white p-3 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                >
+                    {regions.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <select
+                    value={imageType}
+                    onChange={(e) => setImageType(e.target.value)}
+                    className="bg-gray-800 text-white p-3 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                >
+                    {imageTypes.map(it => <option key={it} value={it}>{it}</option>)}
+                </select>
+                <div className="lg:col-span-1">
+                  <ApiProviderSelector provider={apiProvider} setProvider={setApiProvider} title="API Provider" />
+                </div>
+            </div>
+             <button
+                    onClick={handleAnalyzeTrends}
+                    disabled={isLoading || !keyword.trim()}
+                    className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-6 rounded-lg transition-colors disabled:bg-gray-500 disabled:cursor-not-allowed mb-6"
+                >
+                    {isLoading ? <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mx-auto"></div> : 'Analyze Trends'}
+                </button>
+
+            {error && <p className="text-red-400 text-center mb-4">{error}</p>}
+
+            {trendsData && (
+                <div className="space-y-6 bg-gray-800 p-6 rounded-lg relative">
+                    <button
+                        onClick={copyAllResults}
+                        className="absolute top-4 right-4 bg-gray-700 text-white p-2 rounded-md hover:bg-orange-500 transition-colors flex items-center text-sm"
+                        title="Copy all results"
+                    >
+                        <Copy size={16} className="mr-1" /> Copy All
+                    </button>
+                    <h4 className="text-lg font-semibold text-white mb-3">Analysis for "{keyword}" on {platform}</h4>
+                    <p className="text-sm text-gray-300">Timeframe: {timeframe}, Region: {region}, Image Type: {imageType}</p>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <p className="text-md font-semibold text-white mb-1">Trend Score: <span className="text-orange-400">{trendsData.trendScore}/100</span></p>
+                            <p className="text-md font-semibold text-white">Growth Potential: <span className="text-orange-400">{trendsData.growthPotential}</span></p>
+                        </div>
+                        <div>
+                            <p className="text-md font-semibold text-white mb-1">Competitive Landscape Summary:</p>
+                            <p className="text-sm text-gray-300">{trendsData.competitiveLandscapeSummary}</p>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h4 className="text-lg font-semibold text-white mb-3">Visual Trends</h4>
+                        <ul className="list-disc list-inside text-gray-300 space-y-1">
+                            {trendsData.visualTrends?.map((trend, index) => <li key={index}>{trend}</li>)}
+                        </ul>
+                    </div>
+                    <div>
+                        <h4 className="text-lg font-semibold text-white mb-3">Conceptual Trends</h4>
+                        <ul className="list-disc list-inside text-gray-300 space-y-1">
+                            {trendsData.conceptualTrends?.map((trend, index) => <li key={index}>{trend}</li>)}
+                        </ul>
+                    </div>
+                    <div>
+                        <h4 className="text-lg font-semibold text-white mb-3">Keyword Opportunities</h4>
+                        <div className="flex flex-wrap gap-2">
+                            {trendsData.keywordOpportunities?.map((kw, index) => (
+                                <span key={index} className="bg-orange-600 text-white text-sm px-3 py-1 rounded-full">
+                                    {kw}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                    <div>
+                        <h4 className="text-lg font-semibold text-white mb-3">Related Keywords</h4>
+                        <div className="flex flex-wrap gap-2">
+                            {trendsData.relatedKeywords?.map((kw, index) => (
+                                <span key={index} className="bg-gray-700 text-gray-300 text-sm px-3 py-1 rounded-full">
+                                    {kw}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                    <div>
+                        <h4 className="text-lg font-semibold text-white mb-3">Shot List Suggestions</h4>
+                        <ol className="list-decimal list-inside text-gray-300 space-y-1">
+                            {trendsData.shotListSuggestions?.map((shot, index) => <li key={index}>{shot}</li>)}
+                        </ol>
+                    </div>
+                    <div>
+                        <h4 className="text-lg font-semibold text-white mb-3">Top Performing Content Examples</h4>
+                        <ul className="list-disc list-inside text-gray-300 space-y-1">
+                            {trendsData.topPerformingContentExamples?.map((example, index) => <li key={index}>{example}</li>)}
+                        </ul>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+const YouTubePro = ({ handlers }) => {
+    const [script, setScript] = useState('');
+    const [totalVideoLengthToggle, setTotalVideoLengthToggle] = useState(false); // New state for toggle
+    const [totalVideoLength, setTotalVideoLength] = useState('8 seconds');
+    const [sceneDurationToggle, setSceneDurationToggle] = useState(false);
+    const [sceneDuration, setSceneDuration] = useState('8 seconds');
+    const [sceneCount, setSceneCount] = useState(1);
+    const [promptOutputType, setPromptOutputType] = useState('Image Prompt & Image to Video Prompt');
+    const [videoGenre, setVideoGenre] = useState('Movie Trailer');
+    const [minPromptWords, setMinPromptWords] = useState(10); // New state for min words
+    const [maxPromptWords, setMaxPromptWords] = useState(500); // New state for max words
+    const [optimizeSoundToggle, setOptimizeSoundToggle] = useState(false); // Renamed from soundNameToggle
+    const [dialogueNarrationToggle, setDialogueNarrationToggle] = useState(false); // New state for dialogue toggle
+    const [minDialogueWords, setMinDialogueWords] = useState(5); // New state for min dialogue words
+    const [maxDialogueWords, setMaxDialogueWords] = useState(300); // New state for max dialogue words
+    const [voiceStyle, setVoiceStyle] = useState('Default'); // New state for voice style
+    const [generatedPrompts, setGeneratedPrompts] = useState([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [isJsPdfScriptReady, setIsJsPdfScriptReady] = useState(false); // For PDF download
+    const [apiProvider, setApiProvider] = useState('both');
+
+    const totalVideoLengthOptions = ["8 seconds", "1 minute", "5 minutes", "10 minutes", "30 minutes", "60 minutes", "120 minutes", "300 minutes"];
+    const sceneDurationOptions = ["5 seconds", "8 seconds"];
+    const promptOutputTypeOptions = ["Image Prompt", "Image to Video Prompt", "Image Prompt & Image to Video Prompt", "Veo 3 Video Prompt"];
+    const videoGenreOptions = ["Movie Trailer", "Horror Storytelling", "Documentation Video", "Explanation Video", "Animation Video", "Anime Video", "YouTube Shorts", "2D Cartoon Story"];
+    const voiceStyleOptions = ["Default", "Professional", "Storytelling", "Casual", "Enthusiastic", "Calm", "Authoritative", "Friendly"];
+
+    useEffect(() => {
+        // Load jspdf script for PDF download
+        if (!window.jspdf) {
+            const pdfScript = document.createElement('script');
+            pdfScript.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+            pdfScript.async = true;
+            pdfScript.onload = () => setIsJsPdfScriptReady(true);
+            pdfScript.onerror = () => setError("PDF generator script load korte problem hocche.");
+            document.body.appendChild(pdfScript);
+        } else {
+            setIsJsPdfScriptReady(true);
+        }
+    }, []);
+
+    const handleGeneratePrompts = async () => {
+        setIsLoading(true);
+        setError('');
+        setGeneratedPrompts([]);
+
+        let videoLengthInstruction = "";
+        if (totalVideoLengthToggle) {
+            videoLengthInstruction = `Overall Video Length: "${totalVideoLength}".`;
+        } else {
+            videoLengthInstruction = `The overall video length should be implicitly determined by the number of scenes and their durations.`;
+        }
+
+        const jsonSchemaProperties = { sceneNumber: { type: "number", description: "The sequence number of the scene." } };
+        const requiredFields = ["sceneNumber"];
+
+        let promptTypeInstruction = "";
+        const baseImagePromptInstruction = "a detailed image generation prompt for the scene";
+        let baseVideoPromptInstruction = "a detailed image-to-video generation prompt for the scene";
+        let veo3VideoPromptInstruction = "a highly optimized image-to-video prompt specifically for Veo 3, focusing on cinematic quality, camera movements, and dynamic elements";
+
+        if (optimizeSoundToggle) {
+            const soundInstruction = " including optimized sound design elements (e.g., specific sound effects, background music mood, ambient sounds) that fit the scene's visuals and narrative.";
+            baseVideoPromptInstruction += soundInstruction;
+            veo3VideoPromptInstruction += soundInstruction.replace("that fit", "that enhance");
+        }
+
+        if (promptOutputType === "Image Prompt" || promptOutputType === "Image Prompt & Image to Video Prompt") {
+            jsonSchemaProperties.imagePrompt = { type: "string", description: baseImagePromptInstruction };
+            requiredFields.push("imagePrompt");
+        }
+        if (promptOutputType === "Image to Video Prompt" || promptOutputType === "Image Prompt & Image to Video Prompt") {
+            jsonSchemaProperties.videoPrompt = { type: "string", description: baseVideoPromptInstruction };
+            requiredFields.push("videoPrompt");
+        }
+        if (promptOutputType === "Veo 3 Video Prompt") {
+            jsonSchemaProperties.videoPrompt = { type: "string", description: veo3VideoPromptInstruction };
+            requiredFields.push("videoPrompt");
+        }
+
+        if (dialogueNarrationToggle) {
+            jsonSchemaProperties.dialogue = { type: "string", description: `Relevant dialogue or narration for the scene, optimized for the scene's duration (${minDialogueWords}-${maxDialogueWords} words).` };
+            requiredFields.push("dialogue");
+        }
+
+        let dialogueVoiceInstruction = "";
+        if (dialogueNarrationToggle && voiceStyle !== "Default") {
+            dialogueVoiceInstruction = ` Dialogue/narration-ti "${voiceStyle}" voice style-er jonno optimize kora uchit.`;
+        }
+
+        const systemPrompt = `Apni ekjon expert AI video prompt generator. Apnar kaj hocche deya script theke ekta video-r jonno scene-by-scene detailed prompt toiri kora.
+        Video-ti hobe ekta "${videoGenre}".
+        ${videoLengthInstruction}
+        ${sceneCount} ta scene-er jonno prompt toiri korun.
+        ${sceneDurationToggle ? `Prottekta scene-er duration hobe pray "${sceneDuration}".` : ''}
+        ${sceneDurationToggle && sceneDuration === '8 seconds' ? `8-second-er scene-er jonno, visual ebong action details-gulo bhag kore din: 1-3 seconds, 3-6 seconds, ebong 6-8 seconds. Scene shifting ebong transition details include korun.` : ''}
+        ${sceneDurationToggle && sceneDuration === '5 seconds' ? `5-second-er scene-er jonno, visual ebong action details-gulo bhag kore din: 1-2 seconds, 2-4 seconds, ebong 4-5 seconds. Scene shifting ebong transition details include korun.` : ''}
+
+        **Khub guruttopurno, nishchit korun je ${sceneCount} ta scene-er prompt-gulo mile ekta sompurno ebong susongothito golpo toiri kore, jekhane nirdishto scene sonkhyar moddhe ekta shurur, moddho, ebong shesh thakbe.** Golper prabaho ek scene theke arek scene-e smoothly jete hobe.
+
+        Script/Prompt: "${script}"
+
+        Prottekta prompt ${minPromptWords} theke ${maxPromptWords} shobder moddhe hobe.
+        ${dialogueNarrationToggle ? `Jodi "Added Dialogue/Speech Narration" enable kora thake, prottekta scene-er jonno ekta "dialogue" field include korun, jekhane script theke relevant dialogue ba narration thakbe, scene-er duration-er jonno optimize kora, ${minDialogueWords} theke ${maxDialogueWords} shobder moddhe.${dialogueVoiceInstruction}` : ''}
+
+        Result-gulo ekta JSON array of objects hishebe return korun. Prottekta object ekta scene represent korbe ebong nicher schema follow korbe. Kono extra text diben na.`;
+        
+        try {
+            const generationConfig = {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: jsonSchemaProperties,
+                        required: requiredFields
+                    }
+                }
+            };
+            const data = await handlers.makeStandaloneApiCall(systemPrompt, true, generationConfig, apiProvider);
+            setGeneratedPrompts(Array.isArray(data) ? data : []);
+        } catch (e) {
+            setError(`Generation failed: ${e.message}. Please check your prompt and settings.`);
+            console.error(e);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleDownloadTxt = () => {
+        setError('');
+        if (generatedPrompts.length === 0) {
+            setError("Download korar moto kono prompt nei.");
+            return;
+        }
+
+        try {
+            const textContent = generatedPrompts.map((prompt) => {
+                let sceneText = `Scene ${prompt.sceneNumber}:\n`;
+                if (prompt.imagePrompt) sceneText += `  Image Prompt: ${prompt.imagePrompt}\n`;
+                if (prompt.videoPrompt) sceneText += `  Video Prompt: ${prompt.videoPrompt}\n`;
+                if (prompt.dialogue) sceneText += `  Dialogue: ${prompt.dialogue}\n`; // Add dialogue to TXT
+                return sceneText;
+            }).join('\n');
+            
+            const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${videoGenre}_prompts.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            setError("TXT file toiri korte somossa hocche.");
+            console.error(e);
+        }
+    };
+
+    const handleDownloadPdf = () => {
+        setError('');
+        if (!isJsPdfScriptReady || !window.jspdf) {
+            setError("PDF generator ready na. Ektu por chesta korun.");
+            return;
+        }
+        if (generatedPrompts.length === 0) {
+            setError("Download korar moto kono prompt nei.");
+            return;
+        }
+
+        try {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            let y = 10;
+            generatedPrompts.forEach((scene) => {
+                let sceneText = `Scene ${scene.sceneNumber}:\n`;
+                if (scene.imagePrompt) sceneText += `  Image Prompt: ${scene.imagePrompt}\n`;
+                if (scene.videoPrompt) sceneText += `  Video Prompt: ${scene.videoPrompt}\n`;
+                if (scene.dialogue) sceneText += `  Dialogue: ${scene.dialogue}\n`; // Add dialogue to PDF
+                
+                const splitText = doc.splitTextToSize(sceneText, 180);
+                if (y + (splitText.length * 10) > 280) { // Check if content fits on page
+                    doc.addPage();
+                    y = 10; // Reset Y for new page
+                }
+                doc.text(splitText, 10, y);
+                y += (splitText.length * 5) + 5; // Move Y for next scene, add some padding
+            });
+            doc.save(`${videoGenre}_prompts.pdf`);
+        } catch (e) {
+            setError("PDF document toiri korte somossa hocche.");
+            console.error(e);
+        }
+    };
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-6 my-6">
+            <h3 className="text-xl font-semibold text-white mb-4 flex items-center">
+                <Youtube size={24} className="mr-3 text-orange-400" /> YouTube PRO
+            </h3>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Controls */}
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Script / Prompt</label>
+                        <textarea
+                            value={script}
+                            onChange={(e) => setScript(e.target.value)}
+                            placeholder="Enter your video script or a detailed prompt here..."
+                            className="w-full h-40 bg-gray-800 text-white p-3 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                        />
+                    </div>
+                    <div className="bg-gray-800 rounded-lg p-3">
+                        <Toggle label="Enable Total Video Length" isEnabled={totalVideoLengthToggle} onToggle={() => setTotalVideoLengthToggle(!totalVideoLengthToggle)} />
+                        {totalVideoLengthToggle && (
+                            <div className="mt-3">
+                                <label className="block text-sm font-medium text-gray-300 mb-2">Total Video Length</label>
+                                <select
+                                    value={totalVideoLength}
+                                    onChange={(e) => setTotalVideoLength(e.target.value)}
+                                    className="w-full bg-gray-700 text-white p-2 rounded-md border border-gray-600 focus:ring-orange-500 focus:border-orange-500"
+                                >
+                                    {totalVideoLengthOptions.map(len => <option key={len} value={len}>{len}</option>)}
+                                </select>
+                            </div>
+                        )}
+                    </div>
+                    <div className="bg-gray-800 rounded-lg p-3">
+                        <Toggle label="Enable Scene Duration" isEnabled={sceneDurationToggle} onToggle={() => setSceneDurationToggle(!sceneDurationToggle)} />
+                        {sceneDurationToggle && (
+                            <div className="mt-3">
+                                <label className="block text-sm font-medium text-gray-300 mb-2">Scene Duration</label>
+                                <select
+                                    value={sceneDuration}
+                                    onChange={(e) => setSceneDuration(e.target.value)}
+                                    className="w-full bg-gray-700 text-white p-2 rounded-md border border-gray-600 focus:ring-orange-500 focus:border-orange-500"
+                                >
+                                    {sceneDurationOptions.map(dur => <option key={dur} value={dur}>{dur}</option>)}
+                                </select>
+                            </div>
+                        )}
+                        <Slider label="Scene Count" value={sceneCount} min={1} max={500} onChange={(e) => setSceneCount(e.target.value)} unit="scenes" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Prompt Output Type</label>
+                        <select
+                            value={promptOutputType}
+                            onChange={(e) => setPromptOutputType(e.target.value)}
+                            className="w-full bg-gray-800 text-white p-2 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                        >
+                            {promptOutputTypeOptions.map(type => <option key={type} value={type}>{type}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Video Style / Genre</label>
+                        <select
+                            value={videoGenre}
+                            onChange={(e) => setVideoGenre(e.target.value)}
+                            className="w-full bg-gray-800 text-white p-2 rounded-md border border-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                        >
+                            {videoGenreOptions.map(genre => <option key={genre} value={genre}>{genre}</option>)}
+                        </select>
+                    </div>
+                    <ApiProviderSelector provider={apiProvider} setProvider={setApiProvider} title="API Provider" />
+                    <Slider label="Min Prompt Words" value={minPromptWords} min={10} max={500} onChange={(e) => setMinPromptWords(e.target.value)} unit="words" />
+                    <Slider label="Max Prompt Words" value={maxPromptWords} min={10} max={500} onChange={(e) => setMaxPromptWords(e.target.value)} unit="words" />
+                    
+                    {/* New Optimize for Sound Toggle */}
+                    <div className="bg-gray-800 rounded-lg p-3">
+                        <Toggle label="Optimize for Sound" isEnabled={optimizeSoundToggle} onToggle={() => setOptimizeSoundToggle(!optimizeSoundToggle)} />
+                    </div>
+
+                    {/* New Added Dialogue/Speech Narration Toggle and Sliders */}
+                    <div className="bg-gray-800 rounded-lg p-3">
+                        <Toggle label="Added Dialogue/Speech Narration" isEnabled={dialogueNarrationToggle} onToggle={() => setDialogueNarrationToggle(!dialogueNarrationToggle)} />
+                        {dialogueNarrationToggle && (
+                            <div className="mt-3">
+                                <label className="block text-sm font-medium text-gray-300 mb-2">Voice Style</label>
+                                <select
+                                    value={voiceStyle}
+                                    onChange={(e) => setVoiceStyle(e.target.value)}
+                                    className="w-full bg-gray-700 text-white p-2 rounded-md border border-gray-600 focus:ring-orange-500 focus:border-orange-500"
+                                >
+                                    {voiceStyleOptions.map(style => <option key={style} value={style}>{style}</option>)}
+                                </select>
+                                <Slider label="Min Dialogue Words" value={minDialogueWords} min={5} max={300} onChange={(e) => setMinDialogueWords(e.target.value)} unit="words" />
+                                <Slider label="Max Dialogue Words" value={maxDialogueWords} min={5} max={300} onChange={(e) => setMaxDialogueWords(e.target.value)} unit="words" />
+                            </div>
+                        )}
+                    </div>
+
+                    <button
+                        onClick={handleGeneratePrompts}
+                        disabled={isLoading || !script.trim()}
+                        className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center disabled:bg-gray-500 disabled:cursor-not-allowed"
+                    >
+                        {isLoading ? <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div> : 'generation prompt'}
+                    </button>
+                </div>
+
+                {/* Results Panel */}
+                <div className="flex flex-col">
+                    <div className="flex justify-between items-center mb-2">
+                        <h4 className="text-lg font-semibold text-white">Generated Prompts</h4>
+                        {generatedPrompts.length > 0 && (
+                            <div className="flex space-x-2">
+                                <button onClick={handleDownloadTxt} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors flex items-center">
+                                    <Download size={16} className="mr-2" /> TXT
+                                </button>
+                                <button onClick={handleDownloadPdf} disabled={!isJsPdfScriptReady} className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors flex items-center disabled:bg-gray-500 disabled:cursor-not-allowed">
+                                    <Download size={16} className="mr-2" /> PDF
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                    <div className="bg-gray-800 rounded-md p-3 flex-grow h-96 overflow-y-auto">
+                        {isLoading && <p className="text-gray-400">generation prompt...</p>}
+                        {error && <p className="text-red-400 text-sm">{error}</p>}
+                        {!isLoading && !error && generatedPrompts.length === 0 && <p className="text-gray-500">Apnar toiri kora prompt ekhane dekhabe.</p>}
+                        <div className="space-y-4 text-sm text-gray-300">
+                            {generatedPrompts.map((scene, index) => (
+                                <div key={index} className="bg-gray-700 p-3 rounded-md">
+                                    <p className="font-semibold text-orange-400 mb-1">Scene {scene.sceneNumber}:</p>
+                                    {scene.imagePrompt && <p className="mb-1"><strong>Image Prompt:</strong> {scene.imagePrompt}</p>}
+                                    {scene.videoPrompt && <p><strong>Video Prompt:</strong> {scene.videoPrompt}</p>}
+                                    {scene.dialogue && <p><strong>Dialogue:</strong> {scene.dialogue}</p>} {/* Display dialogue */}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+const PromptGeneratorPro = ({ uploadedFiles, setUploadedFiles, handlers }) => {
+    const [promptCount, setPromptCount] = useState(10);
+    const [minWords, setMinWords] = useState(10);
+    const [maxWords, setMaxWords] = useState(500);
+    const [fixRejection, setFixRejection] = useState(false);
+    const [rejectionPlatform, setRejectionPlatform] = useState('AdobeStock');
+    const [promptType, setPromptType] = useState('Photo');
+    const [generationType, setGenerationType] = useState('Same Style');
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [isJsPdfScriptReady, setIsJsPdfScriptReady] = useState(false);
+    const [apiProvider, setApiProvider] = useState('both');
+
+    useEffect(() => {
+        if (!window.jspdf) {
+            const pdfScript = document.createElement('script');
+            pdfScript.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+            pdfScript.async = true;
+            pdfScript.onload = () => setIsJsPdfScriptReady(true);
+            document.body.appendChild(pdfScript);
+        } else {
+            setIsJsPdfScriptReady(true);
+        }
+    }, []);
+    
+    const handleGenerate = async () => {
+        setIsLoading(true);
+        setError('');
+        await handlers.generateProPrompts({ promptCount, minWords, maxWords, fixRejection, rejectionPlatform, promptType, generationType, apiProvider });
+        setIsLoading(false);
+    };
+    
+    const downloadFile = (content, filename, type) => {
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
+
+    const handleDownload = (file, format) => {
+        if (!file.proPrompts || file.proPrompts.length === 0) return;
+        const baseFilename = file.name.split('.').slice(0, -1).join('.');
+        
+        if (format === 'txt') {
+            const textContent = file.proPrompts.map((p, i) => `${i + 1}. ${p}`).join('\n\n');
+            downloadFile(textContent, `${baseFilename}_prompts.txt`, 'text/plain;charset=utf-8;');
+        } else if (format === 'pdf' && isJsPdfScriptReady) {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            let y = 10;
+            file.proPrompts.forEach((prompt, i) => {
+                const text = `${i + 1}. ${prompt}`;
+                const splitText = doc.splitTextToSize(text, 180);
+                if (y + (splitText.length * 10) > 280) {
+                    doc.addPage();
+                    y = 10;
+                }
+                doc.text(splitText, 10, y);
+                y += (splitText.length * 10) + 5;
+            });
+            doc.save(`${baseFilename}_prompts.pdf`);
+        }
+    };
+
+    const handleDownloadAll = (format) => {
+        const allPrompts = uploadedFiles.flatMap(file => 
+            (file.proPrompts || []).map(prompt => `--- ${file.name} ---\n${prompt}`)
+        );
+        if (allPrompts.length === 0) return;
+
+        if (format === 'txt') {
+            const textContent = allPrompts.join('\n\n');
+            downloadFile(textContent, 'all_generated_prompts.txt', 'text/plain;charset=utf-8;');
+        } else if (format === 'pdf' && isJsPdfScriptReady) {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            let y = 10;
+            uploadedFiles.forEach(file => {
+                if (!file.proPrompts || file.proPrompts.length === 0) return;
+                
+                const fileTitle = `--- ${file.name} ---`;
+                let splitText = doc.splitTextToSize(fileTitle, 180);
+                if (y + (splitText.length * 10) > 280) { doc.addPage(); y = 10; }
+                doc.setFont(undefined, 'bold');
+                doc.text(splitText, 10, y);
+                doc.setFont(undefined, 'normal');
+                y += (splitText.length * 10);
+
+                file.proPrompts.forEach((prompt, i) => {
+                    const text = `${i + 1}. ${prompt}`;
+                    splitText = doc.splitTextToSize(text, 180);
+                    if (y + (splitText.length * 10) > 280) { doc.addPage(); y = 10; }
+                    doc.text(splitText, 10, y);
+                    y += (splitText.length * 10) + 5;
+                });
+                y += 5;
+            });
+            doc.save('all_generated_prompts.pdf');
+        }
+    };
+
+    return (
+        <div className="bg-gray-900 rounded-lg p-6 my-6">
+            <h3 className="text-xl font-semibold text-white mb-4 flex items-center">
+                <BrainCircuit size={24} className="mr-3 text-orange-400" /> Prompt Generator Pro
+            </h3>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Controls */}
+                <div className="lg:col-span-1 space-y-4">
+                    <h4 className="text-lg font-semibold text-white">Generator Controls</h4>
+                    <ApiProviderSelector provider={apiProvider} setProvider={setApiProvider} title="API Provider" />
+                    <Slider label="Prompt Count" value={promptCount} min={1} max={300} onChange={(e) => setPromptCount(e.target.value)} unit="prompts" />
+                    <Slider label="Min Prompt Words" value={minWords} min={10} max={500} onChange={(e) => setMinWords(e.target.value)} unit="words" />
+                    <Slider label="Max Prompt Words" value={maxWords} min={10} max={500} onChange={(e) => setMaxWords(e.target.value)} unit="words" />
+                    
+                    <div className="bg-gray-800 rounded-lg p-3">
+                        <Toggle label="Fix Rejection" isEnabled={fixRejection} onToggle={() => setFixRejection(!fixRejection)} />
+                        {fixRejection && (
+                            <select value={rejectionPlatform} onChange={(e) => setRejectionPlatform(e.target.value)} className="w-full mt-2 bg-gray-700 text-white p-2 rounded-md border border-gray-600">
+                                <option value="AdobeStock">AdobeStock</option>
+                                <option value="Freepik">Freepik</option>
+                                <option value="Regular">Regular</option>
+                            </select>
+                        )}
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-1">Prompt Type</label>
+                        <select value={promptType} onChange={(e) => setPromptType(e.target.value)} className="w-full bg-gray-800 text-white p-2 rounded-md border border-gray-700">
+                            <option>Photo</option>
+                            <option>Vector</option>
+                            <option>Illustration</option>
+                            <option>Logo</option>
+                        </select>
+                    </div>
+                     <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-1">Generation Type</label>
+                        <select value={generationType} onChange={(e) => setGenerationType(e.target.value)} className="w-full bg-gray-800 text-white p-2 rounded-md border border-gray-700">
+                            <option value="Same Style">Same Style</option>
+                            <option value="Same Category">Same Category</option>
+                        </select>
+                    </div>
+                    <button onClick={handleGenerate} disabled={isLoading || uploadedFiles.length === 0} className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center disabled:bg-gray-500">
+                        {isLoading ? <><div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div> generation prompt...</> : 'Start Process'}
+                    </button>
+                    {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
+                </div>
+                
+                {/* Results */}
+                <div className="lg:col-span-2">
+                    <div className="flex justify-between items-center mb-4">
+                        <h4 className="text-lg font-semibold text-white">Generated Prompts</h4>
+                         {uploadedFiles.some(f => f.proPrompts && f.proPrompts.length > 0) && (
+                            <div className="flex space-x-2">
+                                <button onClick={() => handleDownloadAll('txt')} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-lg flex items-center text-sm"><Download size={16} className="mr-1" /> All TXT</button>
+                                <button onClick={() => handleDownloadAll('pdf')} disabled={!isJsPdfScriptReady} className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-lg flex items-center text-sm disabled:bg-gray-500"><Download size={16} className="mr-1" /> All PDF</button>
+                            </div>
+                         )}
+                    </div>
+                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[600px] overflow-y-auto pr-2">
+                        {uploadedFiles.length > 0 ? uploadedFiles.map(file => (
+                            <div key={file.id} className="bg-gray-800 rounded-lg p-3 flex flex-col">
+                                <img src={file.preview} alt={file.name} className="w-full h-32 object-cover rounded-md mb-2" />
+                                <p className="text-xs text-gray-400 truncate mb-2">{file.name}</p>
+                                <div className="flex-grow">
+                                    {file.status.proPrompts === 'processing' && <div className="flex items-center justify-center h-full"><div className="animate-spin rounded-full h-6 w-6 border-b-2 border-orange-500"></div></div>}
+                                    {file.status.proPrompts === 'error' && <p className="text-sm text-red-400">Error generating prompts.</p>}
+                                    {file.status.proPrompts === 'completed' && file.proPrompts && file.proPrompts.length > 0 && (
+                                        <div className="bg-gray-700 p-2 rounded-md h-24 overflow-y-auto text-xs text-gray-300 space-y-2 mb-2">
+                                            {file.proPrompts.map((p, i) => <p key={i}><strong>{i+1}.</strong> {p}</p>)}
+                                        </div>
+                                    )}
+                                     {file.status.proPrompts === 'completed' && (!file.proPrompts || file.proPrompts.length === 0) && (
+                                        <p className="text-sm text-gray-500">No prompts generated.</p>
+                                    )}
+                                </div>
+                                 {file.status.proPrompts === 'completed' && file.proPrompts && file.proPrompts.length > 0 && (
+                                    <div className="flex justify-end space-x-2 mt-2">
+                                        <button onClick={() => handleDownload(file, 'txt')} className="text-xs bg-blue-600 text-white px-2 py-1 rounded">TXT</button>
+                                        <button onClick={() => handleDownload(file, 'pdf')} disabled={!isJsPdfScriptReady} className="text-xs bg-red-600 text-white px-2 py-1 rounded disabled:bg-gray-500">PDF</button>
+                                    </div>
+                                )}
+                            </div>
+                        )) : (
+                            <div className="col-span-1 md:col-span-2 text-center text-gray-500 py-10">
+                                <p>Upload images to generate prompts.</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+const MainContent = ({ uploadedFiles, setUploadedFiles, handlers, rewriteStyle, setRewriteStyle, apiKeys, openRouterKeys, isOpenRouterEnabled, apiKeyIndex, globalError, setGlobalError, batchSize, setBatchSize }) => {
+    const [activePlatform, setActivePlatform] = useState('General');
+    const [resultsView, setResultsView] = useState(null);
+    const [activeMasterTool, setActiveMasterTool] = useState(null);
+    const [promptSettingsView, setPromptSettingsView] = useState(null);
+    const [promptMinWords, setPromptMinWords] = useState(50);
+    const [promptMaxWords, setMaxPromptWords] = useState(150);
+    const [processingApiProvider, setProcessingApiProvider] = useState('both');
+    const [promptSettingsApiProvider, setPromptSettingsApiProvider] = useState('both');
+
+
+    const platforms = ["General", "AdobeStock", "Freepik", "Shutterstock", "Vecteezy", "Depositphotos", "123RF", "Dreamstime"];
+    const rewriteStyles = ["More Creative", "SEO Focused", "Short & Punchy", "Technical & Precise"];
+    
+    const handleFileChange = (event) => {
+        const files = Array.from(event.target.files);
+        if (files.length + uploadedFiles.length > 500) {
+            console.error("Cannot upload more than 500 files at once.");
+            event.target.value = null;
+            return;
+        }
+        
+        const newFiles = files.map(file => {
+            const reader = new FileReader();
+            const fileData = {
+                id: `${file.name}-${Date.now()}`,
+                file,
+                name: file.name,
+                preview: URL.createObjectURL(file),
+                base64: null,
+                metadata: { title: '', description: '', keywords: '', category: '', prompt: '', aiBaseModel: '' },
+                aiPrompt: '',
+                videoPrompt: '',
+                rejectionAnalysis: null,
+                competitionAnalysis: null,
+                altText: '',
+                proPrompts: [],
+                status: { metadata: 'pending', aiPrompt: 'pending', videoPrompt: 'pending', rewrite: 'pending', rejectionAnalysis: 'pending', competitionAnalysis: 'pending', altText: 'pending', proPrompts: 'pending' }
+            };
+            
+            reader.onload = (e) => {
+                fileData.base64 = e.target.result.split(',')[1];
+            };
+            reader.readAsDataURL(file);
+            return fileData;
+        });
+        
+        setUploadedFiles(prev => [...prev, ...newFiles]);
+        if (!resultsView && !activeMasterTool) {
+            setResultsView('metadata'); // Set a default view to show stats immediately
+        }
+        event.target.value = null;
+    };
+
+    const removeFile = (idToRemove) => {
+        setUploadedFiles(prevFiles => prevFiles.filter(file => file.id !== idToRemove));
+    };
+
+    const clearAllFiles = () => {
+        uploadedFiles.forEach(file => URL.revokeObjectURL(file.preview));
+        setUploadedFiles([]);
+        setResultsView(null);
+    };
+    
+    const handleProcessingClick = (view, handler) => {
+        setPromptSettingsView(null);
+        setActiveMasterTool(null);
+        setResultsView(view);
+        if (handler) handler();
+    };
+    
+    const handleMasterToolClick = (tool) => {
+        setPromptSettingsView(null);
+        setResultsView(null);
+        setActiveMasterTool(tool);
+    };
+
+    const downloadAllCSV = () => {
+        const sanitize = (str) => `"${(str || '').replace(/"/g, '""')}"`;
+        let csvHeader = [];
+        let csvRows = [];
+
+        switch (activePlatform) {
+            case 'AdobeStock':
+                csvHeader = ["Filename", "Title", "Keywords"];
+                csvRows = uploadedFiles.map(f => [
+                    sanitize(f.name),
+                    sanitize(f.metadata.title),
+                    sanitize(f.metadata.keywords)
+                ].join(','));
+                break;
+            case 'Freepik':
+                csvHeader = ["Filename", "Title", "Keywords", "Prompt", "Base-model"];
+                 csvRows = uploadedFiles.map(f => [
+                    sanitize(f.name),
+                    sanitize(f.metadata.title),
+                    sanitize(f.metadata.keywords),
+                    sanitize(f.metadata.prompt),
+                    sanitize(f.metadata.aiBaseModel)
+                ].join(','));
+                break;
+            case 'General':
+            default:
+                csvHeader = ["Filename", "Title", "Description", "Keywords", "Category", "Prompt", "AI_Base_Model", "Alt_Text"];
+                csvRows = uploadedFiles.map(f => [
+                    sanitize(f.name),
+                    sanitize(f.metadata.title),
+                    sanitize(f.metadata.description),
+                    sanitize(f.metadata.keywords),
+                    sanitize(f.metadata.category),
+                    sanitize(f.metadata.prompt),
+                    sanitize(f.metadata.aiBaseModel),
+                    sanitize(f.altText),
+                ].join(','));
+                break;
+        }
+
+        const combinedCsv = `${csvHeader.join(',')}\n${csvRows.join('\n')}`;
+        const blob = new Blob([combinedCsv], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement("a");
+        if (link.download !== undefined) {
+            const url = URL.createObjectURL(blob);
+            link.setAttribute("href", url);
+            link.setAttribute("download", `${activePlatform}_metadata.csv`);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+    };
+
+    const showPromptSettings = (type) => {
+        setResultsView(null);
+        setActiveMasterTool(null);
+        setPromptSettingsView(type);
+    }
+
+    return (
+        <main className="flex-1 bg-gray-800 p-6 flex flex-col">
+            {globalError && (
+                <div className="bg-red-900 border border-red-700 text-red-200 px-4 py-3 rounded-lg relative mb-4" role="alert">
+                    <strong className="font-bold">Error: </strong>
+                    <span className="block sm:inline">{globalError}</span>
+                    <button onClick={() => setGlobalError('')} className="absolute top-0 bottom-0 right-0 px-4 py-3">
+                        <X size={18} />
+                    </button>
+                </div>
+            )}
+            <div className="flex flex-wrap gap-2 mb-6">
+                {platforms.map(platform => (
+                    <button
+                        key={platform}
+                        onClick={() => setActivePlatform(platform)}
+                        className={`px-4 py-2 text-sm font-medium rounded-full transition-colors ${activePlatform === platform ? 'bg-orange-500 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                    >
+                        {platform}
+                    </button>
+                ))}
+            </div>
+
+            <div className="relative border-2 border-dashed border-gray-600 rounded-lg p-8 text-center flex flex-col justify-center items-center h-64 mb-6">
+                <Upload className="text-gray-500 w-16 h-16 mb-4" />
+                <h3 className="text-xl font-semibold text-white mb-2">Upload Files</h3>
+                <div className="flex space-x-4 my-4">
+                    <button className="bg-gray-700 text-white px-4 py-2 rounded-md text-sm hover:bg-gray-600">JPG/PNG</button>
+                    <button className="bg-gray-700 text-white px-4 py-2 rounded-md text-sm hover:bg-gray-600">SVG</button>
+                    <button className="bg-gray-700 text-white px-4 py-2 rounded-md text-sm hover:bg-gray-600">Videos</button>
+                </div>
+                <p className="text-xs text-gray-500 max-w-md">
+                    Data Protection Statement: We analyze files on-device only, then purge all data after extracting metadata. Upload a maximum of 500 files in a single action.
+                </p>
+                <input
+                    type="file"
+                    multiple
+                    accept="image/jpeg, image/png"
+                    onChange={(e) => handleFileChange(e)}
+                    className="absolute top-0 left-0 w-full h-full opacity-0 cursor-pointer"
+                />
+            </div>
+
+             {uploadedFiles.length > 0 && (
+                <div className="bg-gray-900 rounded-lg p-4 my-6">
+                    <div className="flex flex-col md:flex-row items-center gap-4">
+                        <div className="flex-grow w-full md:w-auto">
+                            <label htmlFor="batch-size" className="text-sm font-medium text-gray-300 mb-2 block">Processing Batch Size</label>
+                            <select
+                                id="batch-size"
+                                value={batchSize}
+                                onChange={(e) => setBatchSize(e.target.value)}
+                                className="bg-gray-700 text-white py-3 px-4 rounded-lg w-full"
+                            >
+                                <option value="1">1 File at Once</option>
+                                <option value="5">5 Files at Once</option>
+                                <option value="10">10 Files at Once</option>
+                                <option value="all">All Files at Once</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <div className="bg-gray-900 rounded-lg p-4 my-6">
+                <h3 className="text-lg font-semibold text-white mb-4 flex items-center">
+                    <Wand2 size={20} className="mr-2 text-orange-400" /> Processing Controls
+                </h3>
+                 <div className="mb-4">
+                    <ApiProviderSelector provider={processingApiProvider} setProvider={setProcessingApiProvider} title="API Provider for Processing" />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    <button onClick={() => handleProcessingClick('metadata', () => handlers.generateMetadata({ apiProvider: processingApiProvider }))} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors">Generate Metadata</button>
+                    <button onClick={() => showPromptSettings('aiPrompts')} className="bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors">Generate AI Prompts</button>
+                    <button onClick={() => showPromptSettings('videoPrompts')} className="bg-pink-600 hover:bg-pink-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors">Image to Video Prompts</button>
+                    <button onClick={() => handleProcessingClick('rejectionAnalysis', () => handlers.analyzeRejection({ apiProvider: processingApiProvider }))} className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center">
+                        <ShieldQuestion size={16} className="mr-2" /> Rejection Analyzer
+                    </button>
+                    <button onClick={() => handleProcessingClick('competitionAnalysis')} className="bg-teal-600 hover:bg-teal-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center">
+                        <BarChart3 size={16} className="mr-2" /> Competitive Analysis
+                    </button>
+                    <button onClick={() => handleProcessingClick('altText', () => handlers.generateAltText({ apiProvider: processingApiProvider }))} className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center">
+                        <FileSignature size={16} className="mr-2" /> Generate Alt Text
+                    </button>
+                    <button onClick={() => handleProcessingClick('promptGeneratorPro')} className="bg-cyan-500 hover:bg-cyan-600 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center">
+                        <BrainCircuit size={16} className="mr-2" /> Prompt Generator Pro
+                    </button>
+                     <button onClick={() => handleMasterToolClick('promptMaster')} className="bg-red-500 hover:bg-red-600 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center">
+                        <BrainCircuit size={16} className="mr-2" /> Prompt Master
+                    </button>
+                     <button onClick={() => handleMasterToolClick('stockMaster')} className="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center">
+                        <BrainCircuit size={16} className="mr-2" /> Stock Master
+                    </button>
+                     <button onClick={() => handleMasterToolClick('marketTrendsAnalyzer')} className="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center">
+                        <LineChart size={16} className="mr-2" /> Market Trends
+                    </button>
+                    <button onClick={() => handleMasterToolClick('youtubePro')} className="bg-purple-500 hover:bg-purple-600 text-white font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center">
+                        <Youtube size={16} className="mr-2" /> YouTube PRO
+                    </button>
+                </div>
+            </div>
+            
+             {uploadedFiles.length > 0 && !activeMasterTool && !promptSettingsView && (
+                 <div className="bg-gray-900 rounded-lg p-4 my-6">
+                    <h3 className="text-lg font-semibold text-white mb-4 flex items-center">
+                        ✨ AI-Powered Bulk Actions
+                    </h3>
+                    <div className="flex flex-col md:flex-row items-center gap-4">
+                        <select 
+                            value={rewriteStyle} 
+                            onChange={(e) => setRewriteStyle(e.target.value)}
+                            className="bg-gray-700 text-white py-3 px-4 rounded-lg w-full md:w-auto flex-grow"
+                        >
+                            {rewriteStyles.map(style => <option key={style} value={style}>{style}</option>)}
+                        </select>
+                        <button 
+                            onClick={() => handleProcessingClick('metadata', () => handlers.rewriteMetadata({ apiProvider: processingApiProvider }))} 
+                            className="bg-yellow-600 hover:bg-yellow-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors w-full md:w-auto flex items-center justify-center"
+                        >
+                            <RefreshCw size={16} className="mr-2" /> Rewrite All Titles & Descriptions
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {promptSettingsView && (
+                <PromptSettingsPanel
+                    title={promptSettingsView === 'aiPrompts' ? "Generate AI Prompts Settings" : "Image to Video Prompts Settings"}
+                    minWords={promptMinWords}
+                    setMinWords={setPromptMinWords}
+                    maxWords={promptMaxWords}
+                    setMaxWords={setMaxPromptWords}
+                    apiProvider={promptSettingsApiProvider}
+                    setApiProvider={setPromptSettingsApiProvider}
+                    onProcess={() => {
+                        if (promptSettingsView === 'aiPrompts') {
+                            handlers.generateAIPrompts(null, promptMinWords, promptMaxWords, { apiProvider: promptSettingsApiProvider });
+                            setResultsView('aiPrompts');
+                        } else if (promptSettingsView === 'videoPrompts') {
+                            handlers.generateVideoPrompts(null, promptMinWords, promptMaxWords, { apiProvider: promptSettingsApiProvider });
+                            setResultsView('videoPrompts');
+                        }
+                        setPromptSettingsView(null);
+                    }}
+                    onCancel={() => setPromptSettingsView(null)}
+                />
+            )}
+
+            {uploadedFiles.length > 0 && (resultsView || activeMasterTool) && (
+                 <>
+                    {resultsView && !activeMasterTool && !promptSettingsView && (
+                        <>
+                            <UploadStats 
+                                files={uploadedFiles} 
+                                view={resultsView}
+                                clearAllFiles={clearAllFiles}
+                            />
+                            <FileThumbnailPreview uploadedFiles={uploadedFiles} removeFile={removeFile} />
+                        </>
+                    )}
+                 </>
+            )}
+
+            {activeMasterTool === 'promptMaster' && <PromptMaster handlers={handlers} />}
+            {activeMasterTool === 'stockMaster' && <StockMaster handlers={handlers} />}
+            {activeMasterTool === 'marketTrendsAnalyzer' && <MarketTrendsAnalyzer handlers={handlers} />}
+            {activeMasterTool === 'youtubePro' && <YouTubePro handlers={handlers} />}
+
+            {uploadedFiles.length > 0 && resultsView && !activeMasterTool && !promptSettingsView && (
+                <div className="flex-grow flex flex-col min-h-0">
+                    {resultsView === 'metadata' && (
+                        <div className="flex justify-end mb-4">
+                            <button onClick={downloadAllCSV} className="bg-orange-500 text-white px-4 py-2 rounded-md text-sm font-semibold flex items-center hover:bg-orange-600">
+                                <Download size={16} className="mr-2" />
+                                Download {activePlatform} CSV
+                            </button>
+                        </div>
+                    )}
+                    {resultsView === 'promptGeneratorPro' ? (
+                         <PromptGeneratorPro uploadedFiles={uploadedFiles} setUploadedFiles={setUploadedFiles} handlers={handlers} />
+                    ) : (
+                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 overflow-y-auto pr-2 flex-grow">
+                            {resultsView === 'metadata' && uploadedFiles.map(file => <FileCard key={file.id} file={file} platform={activePlatform} />)}
+                            {resultsView === 'aiPrompts' && uploadedFiles.map(file => <PromptResultItem key={file.id} file={file} type="ai" />)}
+                            {resultsView === 'videoPrompts' && uploadedFiles.map(file => <PromptResultItem key={file.id} file={file} type="video" />)}
+                            {resultsView === 'rejectionAnalysis' && uploadedFiles.map(file => <RejectionAnalysisCard key={file.id} file={file} />)}
+                            {resultsView === 'competitionAnalysis' && uploadedFiles.map(file => <CompetitiveAnalysisCard key={file.id} file={file} onAnalyze={(fileId, keyword, platform) => handlers.analyzeCompetition(fileId, keyword, platform, { apiProvider: processingApiProvider })} platform={activePlatform} />)}
+                            {resultsView === 'altText' && uploadedFiles.map(file => <AltTextCard key={file.id} file={file} />)}
+                        </div>
+                    )}
+                </div>
+            )}
+        </main>
+    );
+};
+
+// --- App Component ---
+
+function App() {
+    // --- State Management ---
+    const [settings, setSettings] = useState({
+        minTitle: 8, maxTitle: 15,
+        minKeywords: 20, maxKeywords: 35,
+        minDescription: 30, maxDescription: 40,
+        silhouette: false, customPrompt: true,
+        whiteBackground: false, transparentBackground: false,
+        prohibitedWords: true, singleWordKeywords: false,
+    });
+    const [apiKeys, setApiKeys] = useState([{ id: 1, name: 'Gemini API Key', value: '', validationState: 'idle' }]);
+    const [openRouterKeys, setOpenRouterKeys] = useState([{ id: 1, name: 'OpenRouter Key', value: '', validationState: 'idle' }]);
+    const [isOpenRouterEnabled, setIsOpenRouterEnabled] = useState(true);
+    const [rewriteStyle, setRewriteStyle] = useState("More Creative");
+    const [globalError, setGlobalError] = useState('');
+    const [batchSize, setBatchSize] = useState('1');
+    
+    const [uploadedFiles, setUploadedFiles] = useState([]);
+    const apiKeyIndex = useRef({ gemini: 0, openrouter: 0 });
+    
+    const [db, setDb] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+
+    useEffect(() => {
+        try {
+            const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
+            const firestoreDb = getFirestore(app);
+            const authInstance = getAuth(app);
+            setDb(firestoreDb);
+
+            const unsubscribe = onAuthStateChanged(authInstance, async (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                    setIsAuthReady(true);
+                } else {
+                    const authToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                    try {
+                        if (authToken) {
+                            await signInWithCustomToken(authInstance, authToken);
+                        } else {
+                            await signInAnonymously(authInstance);
+                        }
+                    } catch (error) { 
+                        console.error("Authentication failed:", error); 
+                        setIsAuthReady(true); // Still proceed to stop loading screen on auth error
+                    }
+                }
+            });
+            return () => unsubscribe();
+        } catch (error) { 
+            console.error("Firebase initialization failed:", error); 
+            setIsAuthReady(true); // Stop loading on init failure
+        }
+    }, []);
+
+    const settingsDocRef = useMemo(() => {
+        if (db && userId) return doc(db, `artifacts/${appId}/users/${userId}/settings/csvProSettings`);
+        return null;
+    }, [db, userId]);
+
+    useEffect(() => {
+        if (settingsDocRef) {
+            const loadSettings = async () => {
+                try {
+                    const docSnap = await getDoc(settingsDocRef);
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        setSettings(prev => ({ ...prev, ...data.settings }));
+                        if (data.apiKeys) setApiKeys(data.apiKeys.map(k => ({...k, validationState: 'idle'})));
+                        if (data.openRouterKeys) setOpenRouterKeys(data.openRouterKeys.map(k => ({...k, validationState: 'idle'})));
+                        setIsOpenRouterEnabled(data.isOpenRouterEnabled !== undefined ? data.isOpenRouterEnabled : true);
+                    }
+                } catch (error) { console.error("Error loading settings from Firestore:", error); }
+            };
+            loadSettings();
+        }
+    }, [settingsDocRef]);
+
+    const saveSettings = useCallback(async () => {
+        if (settingsDocRef) {
+            try {
+                const keysToSave = apiKeys.map(({ validationState, ...rest }) => rest);
+                const openRouterKeysToSave = openRouterKeys.map(({ validationState, ...rest }) => rest);
+                await setDoc(settingsDocRef, { settings, apiKeys: keysToSave, openRouterKeys: openRouterKeysToSave, isOpenRouterEnabled }, { merge: true });
+            } catch (error) { console.error("Error saving settings to Firestore:", error); }
+        }
+    }, [settingsDocRef, settings, apiKeys, openRouterKeys, isOpenRouterEnabled]);
+    
+    useEffect(() => {
+        if (!isAuthReady) return;
+        const handler = setTimeout(() => { saveSettings(); }, 1500);
+        return () => clearTimeout(handler);
+    }, [settings, apiKeys, openRouterKeys, isOpenRouterEnabled, saveSettings, isAuthReady]);
+    
+    const updateFileState = (id, type, status, data = null) => {
+        setUploadedFiles(prev => prev.map(f => {
+            if (f.id === id) {
+                const newFile = { ...f, status: { ...f.status, [type]: status } };
+                if (data) {
+                    if (type === 'metadata') newFile.metadata = data;
+                    else if (type === 'aiPrompt') newFile.aiPrompt = data;
+                    else if (type === 'videoPrompt') newFile.videoPrompt = data;
+                    else if (type === 'rejectionAnalysis') newFile.rejectionAnalysis = data;
+                    else if (type === 'competitionAnalysis') newFile.competitionAnalysis = data;
+                    else if (type === 'altText') newFile.altText = data;
+                    else if (type === 'rewrite') newFile.metadata = {...f.metadata, title: data.newTitle, description: data.newDescription };
+                    else if (type === 'proPrompts') newFile.proPrompts = data.prompts || [];
+                }
+                return newFile;
+            }
+            return f;
+        }));
+    };
+    
+    const makeStandaloneApiCall = useCallback(async (prompt, isJson, generationConfig = null, apiProvider = 'both') => {
+        const geminiKeys = apiKeys.filter(k => k.value && k.validationState !== 'invalid');
+        const openrouterKeys = isOpenRouterEnabled ? openRouterKeys.filter(k => k.value && k.validationState !== 'invalid') : [];
+
+        const tryGemini = async () => {
+            if (geminiKeys.length === 0) return { success: false };
+            for (let i = 0; i < geminiKeys.length; i++) {
+                apiKeyIndex.current.gemini = (apiKeyIndex.current.gemini + i) % geminiKeys.length;
+                const currentKey = geminiKeys[apiKeyIndex.current.gemini];
+                const geminiKey = currentKey.value;
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
+                try {
+                    const payload = {
+                        contents: [{ parts: [{ text: prompt }] }],
+                        ...(generationConfig && { generationConfig })
+                    };
+                    const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    if (!response.ok) throw new Error(`API Error ${response.status}`);
+                    const result = await response.json();
+                    const textResult = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (textResult) {
+                        return { success: true, data: isJson ? JSON.parse(textResult) : textResult };
+                    }
+                } catch (err) {
+                    console.error(`Error with Gemini key ${currentKey.name}:`, err);
+                }
+            }
+            return { success: false };
+        };
+
+        const tryOpenRouter = async () => {
+            if (openrouterKeys.length === 0) return { success: false };
+            for (let i = 0; i < openrouterKeys.length; i++) {
+                apiKeyIndex.current.openrouter = (apiKeyIndex.current.openrouter + i) % openrouterKeys.length;
+                const currentKey = openrouterKeys[apiKeyIndex.current.openrouter];
+                const openRouterKey = currentKey.value;
+                const apiUrl = `https://openrouter.ai/api/v1/chat/completions`;
+                try {
+                    const payload = {
+                        model: "google/gemini-flash-1.5",
+                        messages: [{ role: "user", content: prompt }],
+                    };
+                    const response = await fetch(apiUrl, { method: 'POST', headers: { 'Authorization': `Bearer ${openRouterKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    if (!response.ok) throw new Error(`API Error ${response.status}`);
+                    const result = await response.json();
+                    const textResult = result.choices[0].message.content;
+                    if (textResult) {
+                        const cleanedText = cleanJsonString(textResult);
+                        return { success: true, data: isJson ? JSON.parse(cleanedText) : cleanedText };
+                    }
+                } catch (err) {
+                    console.error(`Error with OpenRouter key ${currentKey.name}:`, err);
+                }
+            }
+            return { success: false };
+        };
+
+        if (apiProvider === 'gemini') {
+            const result = await tryGemini();
+            if (result.success) return result.data;
+        } else if (apiProvider === 'openrouter') {
+            const result = await tryOpenRouter();
+            if (result.success) return result.data;
+        } else { // 'both'
+            const geminiResult = await tryGemini();
+            if (geminiResult.success) return geminiResult.data;
+            console.log("Gemini failed, trying OpenRouter as fallback...");
+            const openRouterResult = await tryOpenRouter();
+            if (openRouterResult.success) return openRouterResult.data;
+        }
+
+        throw new Error("All API providers and keys failed.");
+    }, [apiKeys, openRouterKeys, isOpenRouterEnabled]);
+
+    const createApiHandler = (type, promptGenerator) => async (...args) => {
+        setGlobalError('');
+
+        let options = {};
+        if (args.length > 0 && typeof args[args.length - 1] === 'object' && args[args.length - 1] !== null && 'apiProvider' in args[args.length - 1]) {
+            options = args.pop();
+        }
+        const apiProvider = options.apiProvider || 'both';
+
+        let fileIdToProcess = null;
+        if (args.length > 0 && typeof args[0] === 'string' && uploadedFiles.some(f => f.id === args[0])) {
+            fileIdToProcess = args[0];
+        }
+
+        const geminiKeys = apiKeys.filter(k => k.value && k.validationState !== 'invalid');
+        const openrouterKeys = isOpenRouterEnabled ? openRouterKeys.filter(k => k.value && k.validationState !== 'invalid') : [];
+        
+        if (apiProvider === 'gemini' && geminiKeys.length === 0) {
+             setGlobalError("Gemini API key is missing or invalid.");
+             return;
+        }
+        if (apiProvider === 'openrouter' && openrouterKeys.length === 0) {
+             setGlobalError("OpenRouter API key is missing or invalid.");
+             return;
+        }
+        if (apiProvider === 'both' && geminiKeys.length === 0 && openrouterKeys.length === 0) {
+            setGlobalError("No valid API keys found. Please add a Gemini or OpenRouter key.");
+            return;
+        }
+    
+        const filesToProcess = fileIdToProcess ? uploadedFiles.filter(f => f.id === fileIdToProcess) : uploadedFiles;
+    
+        const processFile = async (file) => {
+            const needsBase64 = type !== 'rewrite';
+            
+            if (!file || (type !== 'proPrompts' && !fileIdToProcess && file.status[type] === 'completed')) {
+                return;
+            }
+            if (needsBase64 && !file.base64) {
+                 console.log(`Skipping ${file.name}, base64 not ready.`);
+                 return;
+            }
+            if (type === 'rewrite' && (!file.metadata.title || (!fileIdToProcess && file.status.rewrite === 'completed'))) {
+                return;
+            }
+    
+            updateFileState(file.id, type, 'processing');
+            
+            const generatorArgs = [...args];
+            if (fileIdToProcess) {
+                generatorArgs.shift(); // Remove fileId so it's not passed to promptGenerator
+            }
+            const { prompt, isJson, generationConfig } = promptGenerator(file, ...generatorArgs);
+    
+            const tryProviders = async () => {
+                if (apiProvider === 'gemini') return await tryGemini();
+                if (apiProvider === 'openrouter') return await tryOpenRouter();
+                const geminiRes = await tryGemini();
+                if (geminiRes.success) return geminiRes;
+                return await tryOpenRouter();
+            };
+
+            const tryGemini = async () => {
+                if (geminiKeys.length === 0) return { success: false };
+                for (let i = 0; i < geminiKeys.length; i++) {
+                    apiKeyIndex.current.gemini = (apiKeyIndex.current.gemini + 1) % geminiKeys.length;
+                    const currentKey = geminiKeys[apiKeyIndex.current.gemini];
+                    const geminiKey = currentKey.value;
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
+                    try {
+                        const payload = {
+                            contents: [{ parts: [{ text: prompt }, ...(needsBase64 && file.base64 ? [{ inlineData: { mimeType: "image/jpeg", data: file.base64 } }] : [])] }],
+                            ...(generationConfig && { generationConfig })
+                        };
+                        const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                        if (response.ok) {
+                            const result = await response.json();
+                            const textResult = result.candidates[0].content.parts[0].text;
+                            return { success: true, data: isJson ? JSON.parse(textResult) : textResult };
+                        }
+                    } catch (error) {
+                        console.error(`Error with Gemini key ${currentKey.name}:`, error);
+                    }
+                }
+                return { success: false };
+            };
+
+            const tryOpenRouter = async () => {
+                if (openrouterKeys.length === 0) return { success: false };
+                 for (let i = 0; i < openrouterKeys.length; i++) {
+                    apiKeyIndex.current.openrouter = (apiKeyIndex.current.openrouter + 1) % openrouterKeys.length;
+                    const currentKey = openrouterKeys[apiKeyIndex.current.openrouter];
+                    const openRouterKey = currentKey.value;
+                    const apiUrl = `https://openrouter.ai/api/v1/chat/completions`;
+                    try {
+                        const content = [{ type: "text", text: prompt }];
+                        if (needsBase64 && file.base64) {
+                            content.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${file.base64}` } });
+                        }
+                        const payload = { model: "google/gemini-flash-1.5", messages: [{ role: "user", content }] };
+                        const response = await fetch(apiUrl, { method: 'POST', headers: { 'Authorization': `Bearer ${openRouterKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                        if (response.ok) {
+                            const result = await response.json();
+                            const textResult = result.choices[0].message.content;
+                            const cleanedText = cleanJsonString(textResult);
+                            return { success: true, data: isJson ? JSON.parse(cleanedText) : cleanedText };
+                        }
+                    } catch (error) {
+                        console.error(`Error with OpenRouter key ${currentKey.name}:`, error);
+                    }
+                }
+                return { success: false };
+            };
+
+            const result = await tryProviders();
+            if (result.success) {
+                updateFileState(file.id, type, 'completed', result.data);
+            } else {
+                updateFileState(file.id, type, 'error', isJson ? {} : '');
+            }
+        };
+        
+        const size = batchSize === 'all' ? filesToProcess.length : parseInt(batchSize, 10);
+        for (let i = 0; i < filesToProcess.length; i += size) {
+            const batch = filesToProcess.slice(i, i + size);
+            const batchPromises = batch.map(file => processFile(file));
+            await Promise.all(batchPromises);
+        }
+    };
+
+    const handlers = useMemo(() => ({
+        generateMetadata: createApiHandler('metadata', () => ({
+            prompt: `
+                Analyze this image for a stock photography website. Generate a comprehensive metadata package.
+                Return the result as a single JSON object with the following keys:
+                - "title": A concise, descriptive title (${settings.minTitle}-${settings.maxTitle} words).
+                - "description": A detailed description (${settings.minDescription}-${settings.maxDescription} words).
+                - "keywords": A comma-separated string of ${settings.minKeywords}-${settings.maxKeywords} relevant keywords.
+                - "category": Suggest one or two relevant categories for the image.
+                - "prompt": A detailed text-to-image prompt that could have been used to generate this image.
+                - "aiBaseModel": Suggest a plausible AI model used for generation.
+            `,
+            isJson: true
+        })),
+        generateAIPrompts: createApiHandler('aiPrompt', (file, minWords = 50, maxWords = 150) => ({
+            prompt: `Describe this image in extreme detail for a text-to-image AI generator like Midjourney or DALL-E. Focus on capturing the essence of the image. Describe the subject, the environment, the lighting, composition, art style, and mood. The final prompt must be between ${minWords} and ${maxWords} words. Structure your output as a single, detailed paragraph.`,
+            isJson: false
+        })),
+        generateVideoPrompts: createApiHandler('videoPrompt', (file, minWords = 50, maxWords = 150) => ({
+            prompt: `Generate a highly detailed and optimized 4K, 60fps cinematic video prompt based on the provided image. The prompt should be structured for a video AI generator. Start with an engaging opening shot (e.g., "The scene opens with a slow dolly shot..."). Describe the main subject and their actions in detail. Incorporate dynamic elements, animations, and particle effects that enhance the scene (e.g., "Glowing teal lines representing data flow...", "Subtle particle effects..."). Specify a sequence of camera movements like push-ins, rack focus, and zoom outs to create a professional feel. Define the lighting style (e.g., "The lighting is cool and atmospheric, with soft shadows..."). Describe the color grading to set the mood (e.g., "The color grading is a cool teal and deep blue..."). State the desired overall aesthetic, including realism and production quality (e.g., "ultra-realistic and photorealistic, with professional-grade commercial production values, including HDR lighting and cinematic depth of field."). Conclude with a final shot that leaves a lasting impression on the viewer. The entire prompt should be a single, cohesive paragraph between ${minWords} and ${maxWords} words that guides the AI to create a smooth, flowing, and professional video sequence.`,
+            isJson: false
+        })),
+        rewriteMetadata: createApiHandler('rewrite', (file) => ({
+            prompt: `
+                You are an expert copywriter for stock media platforms. Rewrite the following title and description to be more "${rewriteStyle}".
+                Original Title: "${file.metadata.title}"
+                Original Description: "${file.metadata.description}"
+                Keep the core meaning but enhance the language. Adhere to the word count constraints: Title (${settings.minTitle}-${settings.maxTitle} words), Description (${settings.minDescription}-${settings.maxDescription} words).
+                Return ONLY a valid JSON object with "newTitle" and "newDescription" keys.
+            `,
+            isJson: true
+        })),
+        analyzeRejection: createApiHandler('rejectionAnalysis', () => ({
+            prompt: `
+                Act as an expert stock photo reviewer. Analyze this image for common rejection reasons on platforms like Adobe Stock or Shutterstock. 
+                Identify potential issues suchs as:
+                - Technical problems (focus, noise, lighting, composition)
+                - Visible trademarks, logos, or copyrighted content
+                - Recognizable people without a model release (assume no release)
+                - Sensitive or restricted subjects.
+                Return a JSON object with two keys:
+                1. "potentialIssues": An array of objects, where each object has a "reason" (e.g., "Visible Trademark") and an "explanation" (e.g., "A logo is visible on the laptop.").
+                2. "suggestedFixes": An array of strings with actionable advice on how to fix the issues for resubmission (e.g., "Use a healing brush to remove the logo from the laptop.").
+                If no issues are found, return empty arrays for both keys.
+            `,
+            isJson: true
+        })),
+        analyzeCompetition: createApiHandler('competitionAnalysis', (file, keyword, platform) => ({
+            prompt: `
+                Act as a stock photography market analyst. I want to compete on the platform "${platform}" with the keyword "${keyword}".
+                First, mentally search for this keyword and analyze the top-ranking images. Then, analyze my provided image.
+                Return a JSON object with the following keys:
+                1. "marketTrends": A paragraph describing the dominant styles, themes, and compositions for the keyword "${keyword}" on "${platform}".
+                2. "identifiedGaps": A paragraph describing any potential unsaturated niches or opportunities related to this keyword.
+                3. "competitiveScore": An integer from 1 to 10, where 10 is highly competitive.
+                4. "suggestions": A paragraph with specific, actionable advice on how I could improve my image (composition, lighting, subject, etc.) to better compete for this keyword.
+            `,
+            isJson: true
+        })),
+        generateAltText: createApiHandler('altText', () => ({
+            prompt: `
+                As a web accessibility expert, create a concise and descriptive alt text for this image. 
+                The alt text should describe the image's content and function for visually impaired users. 
+                Do not include phrases like "image of" or "picture of". 
+                Be objective and accurate.
+            `,
+            isJson: false
+        })),
+        generateProPrompts: createApiHandler('proPrompts', (file, { promptCount, minWords, maxWords, fixRejection, rejectionPlatform, promptType, generationType }) => {
+            let rejectionInstruction = '';
+            if (fixRejection) {
+                rejectionInstruction = `First, mentally analyze the image for potential rejection reasons on the "${rejectionPlatform}" stock platform (e.g., technical issues, trademarks, model releases). Then, use this analysis to craft the prompts, ensuring they are optimized to avoid these specific rejection issues.`;
+            }
+            return {
+                prompt: `You are an expert AI prompt generator using Google Vision Pro for analysis. Your task is to generate a list of unique, creative, and high-quality prompts based on the provided image.
+                **Crucially, every single prompt you generate must be completely new, unique, and different from all others in the list.** Do not repeat ideas.
+
+                **Image Analysis:** Analyze the provided image in detail.
+                ${rejectionInstruction}
+                
+                **Generation Style:** Generate prompts in the style of "${generationType}".
+                **Prompt Type to Optimize For:** "${promptType}".
+                **Word Count per Prompt:** Between ${minWords} and ${maxWords} words.
+                **Number of Prompts to Generate:** ${promptCount}
+
+                Return ONLY a valid JSON object with a single key: "prompts", which is an array of strings. Each string is a unique, newly generated prompt.`,
+                isJson: true
+            };
+        }),
+        makeStandaloneApiCall
+    }), [apiKeys, openRouterKeys, isOpenRouterEnabled, settings, uploadedFiles, rewriteStyle, batchSize, makeStandaloneApiCall]);
+
+
+    if (!isAuthReady) {
+        return (
+            <div className="bg-gray-900 min-h-screen flex justify-center items-center text-white">
+                <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-orange-500"></div>
+                <p className="ml-4 text-lg">Initializing CSV PRO...</p>
+            </div>
+        );
+    }
+    
+    return (
+        <div className="bg-gray-900 min-h-screen flex flex-col lg:flex-row font-sans">
+            <Sidebar 
+                settings={settings} setSettings={setSettings} 
+                apiKeys={apiKeys} setApiKeys={setApiKeys}
+                openRouterKeys={openRouterKeys} setOpenRouterKeys={setOpenRouterKeys}
+                isOpenRouterEnabled={isOpenRouterEnabled} setIsOpenRouterEnabled={setIsOpenRouterEnabled}
+            />
+            <MainContent 
+                globalError={globalError}
+                setGlobalError={setGlobalError}
+                uploadedFiles={uploadedFiles}
+                setUploadedFiles={setUploadedFiles}
+                handlers={handlers}
+                rewriteStyle={rewriteStyle}
+                setRewriteStyle={setRewriteStyle}
+                apiKeys={apiKeys}
+                openRouterKeys={openRouterKeys}
+                isOpenRouterEnabled={isOpenRouterEnabled}
+                apiKeyIndex={apiKeyIndex}
+                batchSize={batchSize}
+                setBatchSize={setBatchSize}
+            />
+        </div>
+    );
+}
+
+export default App;
